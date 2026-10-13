@@ -329,15 +329,22 @@ Release 0.1 is correct when every fixture produces exactly its expected
 verdicts, recorded in its `fixture.toml`. `mcpgt run` checks each verdict
 against its expectation and exits non-zero on any mismatch.
 
-1. `honest-readonly`, 2. `honest-idempotent`, 3. `liar-idempotent`,
-4. `liar-concurrent`, 5. `liar-readonly`, 6. `silent-safe`, 7. `opaque`,
-8. `flaky`: as specified in the project brief.
-9. `malformed-hints`: a hand-written JSON-RPC server (no SDK), because the
-   SDK server cannot emit malformed hints. It exercises
-   `MALFORMED_DECLARATION` end to end.
-10. `liar-readonly-error`: declares `readOnlyHint: true`, writes a side table,
-    then returns `isError: true`. Expected VIOLATION with
-    `errored_with_side_effects`.
+| # | Fixture | What it is | Key expected verdicts |
+|---|---|---|---|
+| 1 | `honest-readonly` | read-only, genuinely reads only | read_only PASS; others SUPERSEDED_BY_READ_ONLY |
+| 2 | `honest-idempotent` | upsert + audit row per call | sequential PASS (append-only changes) |
+| 3 | `liar-idempotent` | claims idempotent, inserts per call | sequential VIOLATION; destructive PASS |
+| 4 | `liar-concurrent` | check-then-insert, no unique constraint | sequential PASS; concurrent VIOLATION (step 6) |
+| 5 | `liar-readonly` | claims read-only, writes an append-only log | read_only VIOLATION |
+| 6 | `silent-safe` | declares nothing, genuinely idempotent | NO_DECLARATION, behavior "holds" |
+| 7 | `opaque` | real state in an unobserved journal file | PARTIAL_COVERAGE, never PASS |
+| 8 | `flaky` | random token per call | NONDETERMINISTIC, naming `sessions.token` |
+| 9 | `malformed-hints` | hand-written JSON-RPC, no SDK; string, number, null, duplicate-key and list annotations over two pages | MALFORMED_DECLARATION; `readOnlyHint: null` does not supersede |
+| 10 | `liar-readonly-error` | claims read-only, writes, returns `isError` | VIOLATION with `errored_with_side_effects`; a clean failure is CALL_ERROR |
+
+Every fixture's `fixture.toml` records the expected verdict for every tool and
+implemented test; `tests/test_ground_truth.py` runs them all and fails on any
+mismatch or missing expectation.
 
 ## Planned, not yet implemented
 

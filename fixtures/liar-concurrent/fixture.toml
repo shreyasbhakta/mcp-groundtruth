@@ -1,0 +1,34 @@
+[fixture]
+name = "liar-concurrent"
+description = "Declares idempotentHint:true; check-then-insert dedupe with no unique constraint."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["registrations"]
+
+[[tools]]
+name = "register"
+arguments = { key = "new", value = "x" }
+
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+secondary = []
+business_changed = false
+
+[tools.expected.concurrent_idempotence]
+verdict = "VIOLATION"
+business_changed = true
+
+[tools.expected.destructive]
+verdict = "PASS"
+business_changed = true
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+behavior = "fails"

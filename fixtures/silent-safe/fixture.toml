@@ -1,0 +1,32 @@
+[fixture]
+name = "silent-safe"
+description = "Declares no annotations; genuinely idempotent."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["flags"]
+
+[[tools]]
+name = "set_flag"
+arguments = { name = "new", value = "on" }
+
+# No contract to check, but the observed-behavior report must still say what
+# the tool does: idempotent, writes, additive.
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+secondary = []
+behavior = "holds"
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+behavior = "fails"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+behavior = "holds"

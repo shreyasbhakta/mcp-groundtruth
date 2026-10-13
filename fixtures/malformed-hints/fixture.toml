@@ -1,0 +1,75 @@
+[fixture]
+name = "malformed-hints"
+description = "Hand-written JSON-RPC server (no SDK) emitting malformed annotations."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+
+# bump: idempotentHint "true", destructiveHint 1, readOnlyHint false.
+[[tools]]
+name = "bump"
+arguments = { key = "a" }
+
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+secondary = []
+behavior = "holds"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+behavior = "fails"  # overwrites the seeded value
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+# peek: readOnlyHint null does not supersede; its well-formed idempotentHint is tested.
+[[tools]]
+name = "peek"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+behavior = "holds"
+
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+secondary = []
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+
+# dup_peek: readOnlyHint appears twice (both true): malformed, not superseding.
+[[tools]]
+name = "dup_peek"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+behavior = "holds"
+
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+
+# listy: annotations is a list, so every hint is malformed.
+[[tools]]
+name = "listy"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"

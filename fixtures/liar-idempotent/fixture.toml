@@ -1,0 +1,37 @@
+[fixture]
+name = "liar-idempotent"
+description = "Declares idempotentHint:true; inserts a new row on every call."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+# Masking the id leaves the duplicate rows identical: the multiset must still
+# count them.
+mask = [{ region = "items", column = "id", kind = "autoincrement" }]
+
+[[tools]]
+name = "add_item"
+arguments = { key = "c", value = "3" }
+
+[tools.expected.sequential_idempotence]
+verdict = "VIOLATION"
+secondary = []
+business_changed = true
+
+[tools.expected.concurrent_idempotence]
+verdict = "VIOLATION"
+business_changed = true
+
+[tools.expected.destructive]
+verdict = "PASS"
+business_changed = true
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+behavior = "fails"

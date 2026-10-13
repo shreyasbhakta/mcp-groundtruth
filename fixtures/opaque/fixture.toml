@@ -1,0 +1,48 @@
+[fixture]
+name = "opaque"
+description = "Real state lives in a journal file that no adapter observes."
+command = ["{python}", "server.py"]
+
+[state]
+# Ground truth: the journal is state, and nothing observes it.
+locations = ["sqlite:state.db", "file:journal.jsonl"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["settings"]
+
+[[tools]]
+name = "record"
+arguments = { event = "e1" }
+
+# Nothing observed changes, so "holds" on what is seen; coverage is partial,
+# so never PASS.
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:PARTIAL_COVERAGE"
+secondary = []
+behavior = "holds"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:PARTIAL_COVERAGE"
+behavior = "holds"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+secondary = ["PARTIAL_COVERAGE"]
+
+[[tools]]
+name = "peek"
+arguments = { event = "e1" }
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:PARTIAL_COVERAGE"
+secondary = []
+behavior = "holds"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

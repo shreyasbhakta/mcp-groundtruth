@@ -1,0 +1,46 @@
+[fixture]
+name = "liar-readonly-error"
+description = "Declares readOnlyHint:true; writes, then returns isError:true."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+# scratch is deliberately left unclassified: read-only covers all state.
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+
+[[tools]]
+name = "lookup"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "VIOLATION"
+secondary = []
+errored_with_side_effects = true
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[[tools]]
+name = "fail_cleanly"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "INCONCLUSIVE:CALL_ERROR"
+secondary = []
+errored_with_side_effects = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+secondary = ["CALL_ERROR"]
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

@@ -1,0 +1,31 @@
+[fixture]
+name = "flaky"
+description = "Writes a random token per call; identical runs end in different states."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+# sessions.token is deliberately NOT masked: its randomness is the point.
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["sessions"]
+
+[[tools]]
+name = "refresh"
+arguments = { key = "a" }
+
+[tools.expected.sequential_idempotence]
+verdict = "INCONCLUSIVE:NONDETERMINISTIC"
+secondary = []
+behavior = "unstable"
+
+[tools.expected.destructive]
+verdict = "INCONCLUSIVE:NONDETERMINISTIC"
+behavior = "unstable"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+secondary = ["NONDETERMINISTIC"]

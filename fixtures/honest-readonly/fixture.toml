@@ -1,0 +1,32 @@
+[fixture]
+name = "honest-readonly"
+description = "Declares readOnlyHint:true and genuinely only reads."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+append_only = ["audit"]
+
+[[tools]]
+name = "get_item"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "PASS"
+secondary = []
+business_changed = false
+append_only_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+behavior = "holds"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+behavior = "holds"

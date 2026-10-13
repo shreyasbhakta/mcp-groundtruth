@@ -1,0 +1,32 @@
+[fixture]
+name = "liar-readonly"
+description = "Declares readOnlyHint:true; writes an append-only lookup log on every call."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+append_only = ["lookup_log"]
+mask = [{ region = "lookup_log", column = "at", kind = "timestamp" }]
+
+[[tools]]
+name = "get_item"
+arguments = { key = "a" }
+
+# Read-only covers all state: an append-only write alone is a violation.
+[tools.expected.read_only]
+verdict = "VIOLATION"
+secondary = []
+business_changed = false
+append_only_changed = true
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
