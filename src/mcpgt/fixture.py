@@ -16,7 +16,7 @@ from typing import Any
 
 from mcpgt.normalize import MaskRule, Normalizer, VolatileKind
 from mcpgt.snapshot import Classification, Coverage, SnapshotAdapter, SQLiteAdapter
-from mcpgt.verdict import InconclusiveReason, Outcome, TestKind
+from mcpgt.verdict import Behavior, Outcome, Reason, TestKind, parse_reason
 
 FIXTURES_DIR = Path("fixtures")
 
@@ -44,10 +44,15 @@ class AdapterSpec:
 
 @dataclass(frozen=True, slots=True)
 class Expectation:
+    """Ground truth for one (tool, test). Optional fields are checked only if given."""
+
     outcome: Outcome
-    reason: InconclusiveReason | None
-    business_changed: bool | None
-    append_only_changed: bool | None
+    reason: Reason | None
+    business_changed: bool | None = None  # in every run's observation
+    append_only_changed: bool | None = None
+    behavior: Behavior | None = None
+    secondary: tuple[Reason, ...] | None = None  # exact set of secondary reasons
+    errored_with_side_effects: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,24 +218,39 @@ def _tool(data: Any) -> ToolSpec:
     return ToolSpec(name=_str(data["name"], f"{where}.name"), arguments=dict(arguments), expected=expected)
 
 
+_FLAGS = ("business_changed", "append_only_changed", "errored_with_side_effects")
+
+
 def _expectation(data: Any, where: str) -> Expectation:
-    _keys(data, where, required={"verdict"}, optional={"business_changed", "append_only_changed"})
-    # "PASS", "VIOLATION", or "INCONCLUSIVE:<REASON>"
+    _keys(data, where, required={"verdict"}, optional={*_FLAGS, "behavior", "secondary"})
+    # "PASS", "VIOLATION", "INCONCLUSIVE:<REASON>" or "NOT_APPLICABLE:<REASON>"
     outcome_text, _, reason_text = _str(data["verdict"], where).partition(":")
     try:
         outcome = Outcome(outcome_text)
-        reason = InconclusiveReason(reason_text) if reason_text else None
+        reason = parse_reason(reason_text) if reason_text else None
+        secondary = (
+            None
+            if "secondary" not in data
+            else tuple(parse_reason(r) for r in _strs(data["secondary"], f"{where}.secondary"))
+        )
+        behavior = None if "behavior" not in data else Behavior(_str(data["behavior"], where))
     except ValueError as exc:
-        raise FixtureError(f"{where}: bad verdict {data['verdict']!r}") from exc
-    if (outcome is Outcome.INCONCLUSIVE) != (reason is not None):
-        raise FixtureError(f"{where}: INCONCLUSIVE needs a reason, and only it may have one")
+        raise FixtureError(f"{where}: {exc}") from exc
+    needs_reason = outcome in (Outcome.INCONCLUSIVE, Outcome.NOT_APPLICABLE)
+    if needs_reason != (reason is not None):
+        raise FixtureError(f"{where}: INCONCLUSIVE and NOT_APPLICABLE need a reason, and only they may have one")
+    if reason is not None and type(reason).__name__ != {
+        Outcome.INCONCLUSIVE: "InconclusiveReason",
+        Outcome.NOT_APPLICABLE: "NotApplicableReason",
+    }[outcome]:
+        raise FixtureError(f"{where}: {reason.value} is not a reason for {outcome.value}")
     flags = {}
-    for key in ("business_changed", "append_only_changed"):
+    for key in _FLAGS:
         value = data.get(key)
         if value is not None and not isinstance(value, bool):
             raise FixtureError(f"{where}.{key} must be a boolean")
         flags[key] = value
-    return Expectation(outcome=outcome, reason=reason, **flags)
+    return Expectation(outcome=outcome, reason=reason, behavior=behavior, secondary=secondary, **flags)
 
 
 def _keys(data: Any, where: str, required: set[str], optional: set[str] = frozenset()) -> None:

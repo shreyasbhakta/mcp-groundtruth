@@ -242,6 +242,19 @@ class RegionDelta:
     def changed(self) -> bool:
         return bool(self.added or self.removed) or self.columns_before != self.columns_after
 
+    def differing_columns(self) -> tuple[str, ...]:
+        """Columns whose multiset of values differs between removed and added records.
+
+        If the column set itself changed, every column of either side is named.
+        """
+        if self.columns_before != self.columns_after:
+            return tuple(sorted(set(self.columns_before or ()) | set(self.columns_after or ())))
+        return tuple(
+            column
+            for i, column in enumerate(self.columns_after or ())
+            if Counter(r[i] for r in self.removed) != Counter(r[i] for r in self.added)
+        )
+
     def to_json(self) -> dict[str, Any]:
         return {
             "region": self.region,

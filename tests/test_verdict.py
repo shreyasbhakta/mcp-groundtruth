@@ -8,21 +8,32 @@ from mcpgt.contracts import Annotation, parse_tool
 from mcpgt.fixture import FixtureCoverage
 from mcpgt.snapshot import Coverage, RegionDelta, SnapshotDelta, StateCategory
 from mcpgt.verdict import (
+    HINT_FOR,
     Behavior,
     Incoherence,
-    InconclusiveReason,
+    InconclusiveReason as IR,
+    Instability,
+    NotApplicableReason as NA,
     Observation,
     Outcome,
     ResetStatus,
     TestKind,
     coherence,
     derive,
+    instability_between,
 )
 
 B, A, U = StateCategory.BUSINESS, StateCategory.APPEND_ONLY, StateCategory.UNCLASSIFIED
 ROW = (("text", "x"),)
 FULL = FixtureCoverage(adapters=(Coverage("sqlite:s", ("all",), ()),), unobserved=())
 PARTIAL = FixtureCoverage(adapters=(Coverage("sqlite:s", ("all",), ()),), unobserved=("memory:process",))
+SEQ, RO, DE = TestKind.SEQUENTIAL_IDEMPOTENCE, TestKind.READ_ONLY, TestKind.DESTRUCTIVE
+
+# Falsifiable claims for each test, without readOnlyHint:true superseding the others.
+WRITER = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}
+READER = {"readOnlyHint": True}
+CLAIM_FOR = {SEQ: WRITER, DE: WRITER, RO: READER}
+UNSTABLE = Instability(("t/once-1", "t/once-2"), ("sqlite:s/items.value",), 1, 1)
 
 
 def obs(baseline, *, added=(), removed=()):
@@ -51,36 +62,36 @@ def evidence(
     *,
     idem=None,
     effect=None,
-    once_stable=True,
-    twice_stable=True,
+    once_instability=(),
+    twice_instability=(),
     call_error=None,
     setup_error=None,
-    contract_stable=True,
-    runs=3,
+    contract_instability=(),
+    errored_with_side_effects=False,
 ):
-    clean_i, clean_e = obs("once"), obs("control")
     return SimpleNamespace(
         tool="t",
-        contract=contract(**hints) if isinstance(hints, dict) else hints,
+        contract=contract(**hints),
         contract_error=None,
-        contract_stable=contract_stable,
-        idempotence=tuple(idem if idem is not None else [clean_i] * runs),
-        effect=tuple(effect if effect is not None else [clean_e] * runs),
-        once_stable=once_stable,
-        twice_stable=twice_stable,
+        contract_instability=contract_instability,
+        idempotence=tuple(idem if idem is not None else [obs("once")] * 3),
+        effect=tuple(effect if effect is not None else [obs("control")] * 3),
+        once_instability=once_instability,
+        twice_instability=twice_instability,
         call_error=call_error,
         setup_error=setup_error,
+        errored_with_side_effects=errored_with_side_effects,
     )
 
 
-def fixture_run(ev, *, reset=ResetStatus.VERIFIED, coverage=FULL, control_stable=True, control_error=None, runs=3):
+def fixture_run(ev, *, reset=ResetStatus.VERIFIED, coverage=FULL, control_instability=(), control_error=None):
     return SimpleNamespace(
         tools=(ev,),
         reset=SimpleNamespace(status=reset, detail="detail"),
         coverage=coverage,
-        control_stable=control_stable,
+        control_instability=control_instability,
         control_error=control_error,
-        runs=runs,
+        runs=3,
     )
 
 
@@ -89,161 +100,212 @@ def verdict_for(test, ev, **run_kw):
     return v
 
 
-SEQ, RO, DE = TestKind.SEQUENTIAL_IDEMPOTENCE, TestKind.READ_ONLY, TestKind.DESTRUCTIVE
-CLAIMS = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-
-
 def outcome(v):
     return (v.outcome, v.reason)
+
+
+def claim(test, **kw):
+    return evidence(CLAIM_FOR[test], **kw)
 
 
 # --- Declaration rules come first ------------------------------------------
 
 
 @pytest.mark.parametrize("test", [SEQ, RO, DE])
-def test_absent_hint_is_no_declaration_even_when_the_run_is_broken(test):
+def test_absent_hint_is_no_declaration_and_keeps_run_problems_visible(test):
     v = verdict_for(test, evidence({}, call_error="boom"), reset=ResetStatus.UNVERIFIED)
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.NO_DECLARATION)
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.NO_DECLARATION)
+    assert v.secondary_reasons == (IR.RESET_UNVERIFIED, IR.CALL_ERROR)
+    assert v.to_json()["secondary_reasons"] == ["RESET_UNVERIFIED", "CALL_ERROR"]
 
 
 def test_malformed_hint_is_malformed_declaration():
     v = verdict_for(SEQ, evidence({"idempotentHint": "true"}))
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.MALFORMED_DECLARATION)
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.MALFORMED_DECLARATION)
+    assert v.secondary_reasons == ()
 
 
 def test_undeclared_tool_still_reports_observed_behavior():
     v = verdict_for(SEQ, evidence({}))
-    assert v.reason is InconclusiveReason.NO_DECLARATION
+    assert v.reason is IR.NO_DECLARATION
     assert v.behavior is Behavior.HOLDS
     assert len(v.observations) == 3
 
 
 @pytest.mark.parametrize(
     "test, hints",
-    [
-        (RO, {"readOnlyHint": False}),
-        (DE, {"destructiveHint": True}),
-        (SEQ, {"idempotentHint": False}),
-    ],
+    [(RO, {"readOnlyHint": False}), (DE, {"destructiveHint": True}), (SEQ, {"idempotentHint": False})],
 )
 def test_permissive_hints_are_not_applicable_with_behavior_attached(test, hints):
     ev = evidence(hints, idem=[obs("once", added=[B])] * 3, effect=[obs("control", added=[B], removed=[B])] * 3)
     v = verdict_for(test, ev)
-    assert outcome(v) == (Outcome.NOT_APPLICABLE, None)
+    assert outcome(v) == (Outcome.NOT_APPLICABLE, NA.PERMISSIVE_DECLARATION)
     assert v.behavior is Behavior.FAILS
     assert v.to_json()["observed"]["runs"]
+
+
+# --- readOnlyHint:true supersedes destructive and idempotence ----------------
+
+
+@pytest.mark.parametrize("test", [SEQ, DE])
+@pytest.mark.parametrize(
+    "others",
+    [{}, {"destructiveHint": False, "idempotentHint": True}, {"destructiveHint": True, "idempotentHint": False}],
+)
+def test_explicit_read_only_supersedes_whatever_else_is_declared(test, others):
+    ev = evidence({"readOnlyHint": True, **others}, idem=[obs("once", added=[B])] * 3, effect=[obs("control", removed=[B])] * 3)
+    v = verdict_for(test, ev)
+    assert outcome(v) == (Outcome.NOT_APPLICABLE, NA.SUPERSEDED_BY_READ_ONLY)
+    assert v.behavior is Behavior.FAILS  # observed behavior still attached
+
+
+def test_read_only_test_itself_is_not_superseded():
+    assert verdict_for(RO, evidence(READER)).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("read_only", [{}, {"readOnlyHint": "true"}, {"readOnlyHint": None}])
+def test_only_explicit_true_supersedes(read_only):
+    v = verdict_for(SEQ, evidence({**read_only, "idempotentHint": True}))
+    assert v.outcome is Outcome.PASS
 
 
 # --- Harness-trust rules ----------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "reset, reason",
-    [(ResetStatus.UNVERIFIED, InconclusiveReason.RESET_UNVERIFIED), (ResetStatus.SETUP_FAILED, InconclusiveReason.SETUP_FAILED)],
-)
+@pytest.mark.parametrize("reset, reason", [(ResetStatus.UNVERIFIED, IR.RESET_UNVERIFIED), (ResetStatus.SETUP_FAILED, IR.SETUP_FAILED)])
 @pytest.mark.parametrize("test", [SEQ, RO, DE])
 def test_reset_problems_block_every_falsifiable_verdict(test, reset, reason):
-    assert verdict_for(test, evidence(CLAIMS), reset=reset).reason is reason
+    assert verdict_for(test, claim(test), reset=reset).reason is reason
 
 
-def test_call_error():
-    v = verdict_for(SEQ, evidence(CLAIMS, call_error="tool returned isError"))
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.CALL_ERROR)
+def test_call_error_with_secondary_reasons():
+    v = verdict_for(SEQ, claim(SEQ, call_error="isError with no state change"), coverage=PARTIAL)
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.CALL_ERROR)
+    assert v.secondary_reasons == (IR.PARTIAL_COVERAGE,)
+
+
+def test_errored_with_side_effects_is_judged_on_state():
+    ev = claim(RO, effect=[obs("control", added=[U])] * 3, errored_with_side_effects=True)
+    v = verdict_for(RO, ev)
+    assert outcome(v) == (Outcome.VIOLATION, None)
+    assert v.to_json()["observed"]["errored_with_side_effects"] is True
 
 
 def test_setup_error_in_tool_sessions():
-    assert verdict_for(RO, evidence(CLAIMS, setup_error="did not start")).reason is InconclusiveReason.SETUP_FAILED
+    assert verdict_for(RO, claim(RO, setup_error="did not start")).reason is IR.SETUP_FAILED
 
 
-def test_unstable_contract():
-    assert verdict_for(SEQ, evidence(CLAIMS, contract_stable=False)).reason is InconclusiveReason.NONDETERMINISTIC
+def test_unstable_contract_names_the_hints():
+    v = verdict_for(SEQ, claim(SEQ, contract_instability=("idempotentHint",)))
+    assert v.reason is IR.NONDETERMINISTIC
+    assert "idempotentHint" in v.issues[0].detail
 
 
 def test_unstable_control_blocks_read_only_and_destructive_only():
-    ev = evidence(CLAIMS)
+    unstable = (Instability(("control-1", "control-2"), ("sqlite:s/boot.at",), 1, 1),)
     for test in (RO, DE):
-        v = verdict_for(test, ev, control_stable=False)
-        assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.NONDETERMINISTIC)
-        assert "control" in v.detail
-    assert verdict_for(SEQ, ev, control_stable=False).outcome is Outcome.PASS
+        v = verdict_for(test, claim(test), control_instability=unstable)
+        assert outcome(v) == (Outcome.INCONCLUSIVE, IR.NONDETERMINISTIC)
+        assert "sqlite:s/boot.at" in v.issues[0].detail
+    assert verdict_for(SEQ, claim(SEQ), control_instability=unstable).outcome is Outcome.PASS
 
 
 def test_failed_control_session_is_setup_failure_for_control_based_tests():
-    assert verdict_for(RO, evidence(CLAIMS), control_error="crash").reason is InconclusiveReason.SETUP_FAILED
+    assert verdict_for(RO, claim(RO), control_error="crash").reason is IR.SETUP_FAILED
+    assert verdict_for(SEQ, claim(SEQ), control_error="crash").outcome is Outcome.PASS
+
+
+def test_nondeterminism_evidence_names_columns():
+    v = verdict_for(SEQ, claim(SEQ, idem=[obs("once", added=[B])] * 3, once_instability=(UNSTABLE,)))
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.NONDETERMINISTIC)
+    assert v.behavior is Behavior.UNSTABLE
+    assert "sqlite:s/items.value" in v.issues[0].detail
+    (nd,) = v.to_json()["observed"]["nondeterminism"]
+    assert nd["columns"] == ["sqlite:s/items.value"]
+    assert nd["compared"] == ["t/once-1", "t/once-2"]
 
 
 def test_runs_disagreeing_is_nondeterministic():
-    ev = evidence(CLAIMS, idem=[obs("once", added=[B]), obs("once"), obs("once", added=[B])])
-    v = verdict_for(SEQ, ev)
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.NONDETERMINISTIC)
-    assert v.behavior is Behavior.UNSTABLE
-
-
-def test_states_differing_across_runs_is_nondeterministic_even_if_findings_agree():
-    v = verdict_for(SEQ, evidence(CLAIMS, once_stable=False))
-    assert v.reason is InconclusiveReason.NONDETERMINISTIC
+    ev = claim(SEQ, idem=[obs("once", added=[B]), obs("once"), obs("once", added=[B])])
+    assert outcome(verdict_for(SEQ, ev)) == (Outcome.INCONCLUSIVE, IR.NONDETERMINISTIC)
 
 
 def test_violation_needs_three_complete_runs():
-    ev = evidence(CLAIMS, idem=[obs("once", added=[B])] * 2)
-    v = verdict_for(SEQ, ev)
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.NONDETERMINISTIC)
+    ev = claim(SEQ, idem=[obs("once", added=[B])] * 2)
+    assert outcome(verdict_for(SEQ, ev)) == (Outcome.INCONCLUSIVE, IR.NONDETERMINISTIC)
+
+
+def test_instability_between_names_differing_columns_only():
+    region = RegionDelta(
+        region="items",
+        category=B,
+        columns_before=("key", "value"),
+        columns_after=("key", "value"),
+        added=((("text", "a"), ("text", "2")),),
+        removed=((("text", "a"), ("text", "1")),),
+    )
+    item = instability_between(("x", "y"), [SnapshotDelta("sqlite:s", (region,))])
+    assert item.columns == ("sqlite:s/items.value",)
+    assert instability_between(("x", "y"), [SnapshotDelta("sqlite:s", ())]) is None
 
 
 # --- Observation rules ------------------------------------------------------
 
 
 def test_sequential_idempotence_violation_and_pass():
-    assert verdict_for(SEQ, evidence(CLAIMS, idem=[obs("once", added=[B])] * 3)).outcome is Outcome.VIOLATION
-    assert verdict_for(SEQ, evidence(CLAIMS, idem=[obs("once", added=[A])] * 3)).outcome is Outcome.PASS
+    assert verdict_for(SEQ, claim(SEQ, idem=[obs("once", added=[B])] * 3)).outcome is Outcome.VIOLATION
+    assert verdict_for(SEQ, claim(SEQ, idem=[obs("once", added=[A])] * 3)).outcome is Outcome.PASS
 
 
 def test_unclassified_change_is_unclassified_state_for_idempotence():
-    v = verdict_for(SEQ, evidence(CLAIMS, idem=[obs("once", added=[U])] * 3))
-    assert outcome(v) == (Outcome.INCONCLUSIVE, InconclusiveReason.UNCLASSIFIED_STATE)
+    v = verdict_for(SEQ, claim(SEQ, idem=[obs("once", added=[U])] * 3))
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.UNCLASSIFIED_STATE)
 
 
 @pytest.mark.parametrize("category", [B, A, U])
 def test_read_only_violated_by_change_in_any_category(category):
-    v = verdict_for(RO, evidence(CLAIMS, effect=[obs("control", added=[category])] * 3))
+    v = verdict_for(RO, claim(RO, effect=[obs("control", added=[category])] * 3))
     assert outcome(v) == (Outcome.VIOLATION, None)
+    assert v.affected_categories == (category,)
 
 
 @pytest.mark.parametrize(
-    "removed, expected",
+    "removed, expected, categories",
     [
-        ([B], (Outcome.VIOLATION, None)),
-        ([A], (Outcome.VIOLATION, None)),
-        ([U], (Outcome.INCONCLUSIVE, InconclusiveReason.UNCLASSIFIED_STATE)),
-        ([], (Outcome.PASS, None)),
+        ([B], (Outcome.VIOLATION, None), ["business"]),
+        ([A], (Outcome.VIOLATION, None), ["append_only"]),
+        ([B, A], (Outcome.VIOLATION, None), ["business", "append_only"]),
+        ([U], (Outcome.INCONCLUSIVE, IR.UNCLASSIFIED_STATE), ["unclassified"]),
+        ([], (Outcome.PASS, None), []),
     ],
 )
-def test_destructive_depends_on_removals(removed, expected):
-    ev = evidence(CLAIMS, effect=[obs("control", added=[B], removed=removed)] * 3)
-    assert outcome(verdict_for(DE, ev)) == expected
-
-
-def test_additions_alone_are_not_destructive():
-    ev = evidence(CLAIMS, effect=[obs("control", added=[B, A])] * 3)
-    assert verdict_for(DE, ev).outcome is Outcome.PASS
+def test_destruction_is_reported_by_sub_category(removed, expected, categories):
+    ev = claim(DE, effect=[obs("control", added=[B], removed=removed)] * 3)
+    v = verdict_for(DE, ev)
+    assert outcome(v) == expected
+    assert v.to_json()["observed"]["affected_categories"] == categories
 
 
 def test_partial_coverage_blocks_pass_but_not_violation():
-    clean = evidence(CLAIMS)
     for test in (SEQ, RO, DE):
-        assert verdict_for(test, clean, coverage=PARTIAL).reason is InconclusiveReason.PARTIAL_COVERAGE
-    dirty = evidence(CLAIMS, effect=[obs("control", added=[B])] * 3)
-    assert verdict_for(RO, dirty, coverage=PARTIAL).outcome is Outcome.VIOLATION
+        v = verdict_for(test, claim(test), coverage=PARTIAL)
+        assert outcome(v) == (Outcome.INCONCLUSIVE, IR.PARTIAL_COVERAGE)
+    v = verdict_for(RO, claim(RO, effect=[obs("control", added=[B])] * 3), coverage=PARTIAL)
+    assert outcome(v) == (Outcome.VIOLATION, None)
+    assert v.secondary_reasons == (IR.PARTIAL_COVERAGE,)
 
 
 def test_every_verdict_carries_its_evidence():
-    for v in derive(fixture_run(evidence(CLAIMS))):
+    for v in derive(fixture_run(evidence(WRITER))):
         data = v.to_json()
-        assert data["contract"]["hints"]["readOnlyHint"] == "true"
-        assert data["observed"]["runs"] and "deltas" in data["observed"]["runs"][0]
-        assert set(data["observed"]["runs"][0]["changed"]) == {"business", "append_only", "unclassified"}
+        assert data["contract"]["hints"]["idempotentHint"] == "true"
+        observed = data["observed"]
+        assert observed["runs"] and "deltas" in observed["runs"][0]
+        assert set(observed["runs"][0]["changed"]) == {"business", "append_only", "unclassified"}
+        assert {"affected_categories", "errored_with_side_effects", "nondeterminism"} <= observed.keys()
         assert data["coverage"]["complete"] is True
         assert data["run_count"] == 3
+        assert "secondary_reasons" in data
 
 
 # --- Coherence --------------------------------------------------------------
@@ -264,7 +326,5 @@ def test_coherence(hints, issues):
 
 
 def test_hint_mapping_covers_every_test():
-    from mcpgt.verdict import HINT_FOR
-
     assert set(HINT_FOR) == set(TestKind)
     assert HINT_FOR[RO] is Annotation.READ_ONLY

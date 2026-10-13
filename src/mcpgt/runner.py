@@ -20,11 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mcpgt.contracts import ContractParseError, DeclaredContract, ToolListing, parse_listing
+from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, ToolListing, parse_listing
 from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec
 from mcpgt.normalize import NormalizationError
 from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, diff
-from mcpgt.verdict import MIN_RUNS, Observation, ResetStatus
+from mcpgt.verdict import MIN_RUNS, Instability, Observation, ResetStatus, instability_between
 from mcpgt.wire import RawResponse, WireClient, WireError
 
 State = dict[str, Snapshot]  # surface -> snapshot
@@ -153,26 +153,32 @@ class Session:
     stderr: str = ""
 
     @property
-    def call_error(self) -> str | None:
+    def transport_error(self) -> str | None:
+        """The connection died, or a call got a JSON-RPC error instead of a result."""
         if self.wire_error is not None:
             return self.wire_error
         for response in self.responses:
             if response.is_error:
                 return f"JSON-RPC error: {response.text[:500]}"
-            if response.result is not None and response.result.get("isError") is True:
-                return f"tool returned isError: {response.text[:500]}"
         return None
 
     @property
+    def tool_errored(self) -> bool:
+        """Some call completed with ``isError: true``."""
+        return any(r.result is not None and r.result.get("isError") is True for r in self.responses)
+
+    @property
     def ok(self) -> bool:
-        return self.setup_error is None and self.call_error is None and self.after is not None
+        """Completed and observed. Tool-level errors are judged separately."""
+        return self.setup_error is None and self.transport_error is None and self.after is not None
 
     def to_json(self) -> dict[str, Any]:
         return {
             "label": self.label,
             "calls": list(self.calls),
             "setup_error": self.setup_error,
-            "call_error": self.call_error,
+            "transport_error": self.transport_error,
+            "tool_errored": self.tool_errored,
             "responses": [r.text for r in self.responses],
             "stderr_tail": self.stderr[-2000:],
         }
@@ -238,21 +244,19 @@ class ToolEvidence:
     tool: str
     contract: DeclaredContract | None
     contract_error: str | None  # why there is no contract
-    contract_stable: bool
+    contract_instability: tuple[str, ...]  # hints whose declared value differed across sessions
     once: tuple[Session, ...]
     twice: tuple[Session, ...]
     idempotence: tuple[Observation, ...]  # per run: once vs twice
     effect: tuple[Observation, ...]  # per run: control vs once
-    once_stable: bool  # once-states identical across runs after normalization
-    twice_stable: bool
+    once_instability: tuple[Instability, ...]  # once-states that differ from once-1
+    twice_instability: tuple[Instability, ...]
+    call_error: str | None  # transport error, or isError with no state change
+    errored_with_side_effects: bool  # isError, yet state changed; judged on state
 
     @property
     def setup_error(self) -> str | None:
         return next((s.setup_error for s in self.once + self.twice if s.setup_error), None)
-
-    @property
-    def call_error(self) -> str | None:
-        return next((s.call_error for s in self.once + self.twice if s.call_error), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,13 +272,17 @@ class FixtureRun:
     reset: ResetVerification
     coverage: FixtureCoverage
     controls: tuple[Session, ...]
-    control_stable: bool
     control_error: str | None
+    control_instability: tuple[Instability, ...]
     control_effect: tuple[Observation, ...]  # per control: seed vs control (startup/shutdown writes)
     listings: tuple[ListingRecord, ...]
     listing_errors: tuple[str, ...]
     tools: tuple[ToolEvidence, ...]
     untested_tools: tuple[str, ...] = field(default=())  # listed by the server, no ToolSpec
+
+    @property
+    def control_stable(self) -> bool:
+        return self.control_error is None and not self.control_instability
 
     @property
     def sessions(self) -> tuple[Session, ...]:
@@ -311,26 +319,26 @@ async def run_fixture(
                 once.append(await run_session(fixture, state_dir, f"{spec.name}/once-{i}", [spec]))
                 twice.append(await run_session(fixture, state_dir, f"{spec.name}/twice-{i}", [spec, spec]))
 
-    control_error = next((s.setup_error for s in controls if s.setup_error), None)
     if reset_result.status is ResetStatus.SETUP_FAILED:
         control_error = reset_result.detail
-    control_states = [s.after for s in controls if s.after is not None]
-    control_stable = control_error is None and _all_equal(fixture, control_states)
+    else:
+        control_error = next((s.setup_error or s.transport_error for s in controls if not s.ok), None)
+    control_instability = _instability(fixture, [s for s in controls if s.ok])
     control_effect = tuple(
         Observation("seed", deltas(fixture, s.before, s.after))
         for s in controls
         if s.before is not None and s.after is not None
     )
+    baseline = controls[0].after if control_error is None and not control_instability else None
 
-    listings, listing_errors, contract_sets = _listings(
-        [s for s in controls] + [s for o, t in per_tool.values() for s in o + t]
-    )
-    baseline = control_states[0] if control_states and control_stable else None
+    all_sessions = list(controls) + [s for o, t in per_tool.values() for s in o + t]
+    listings, listing_errors, contract_sets = _listings(all_sessions)
 
     evidence = []
     for spec in specs:
         once, twice = per_tool[spec.name]
-        contract, contract_error, contract_stable = _contract_for(spec.name, contract_sets, listing_errors)
+        contract, contract_error, contract_instability = _contract_for(spec.name, contract_sets, listing_errors)
+        call_error, side_effects = _tool_errors(fixture, once + twice, baseline)
         idempotence = tuple(
             Observation("once", deltas(fixture, o.after, t.after))
             for o, t in zip(once, twice)
@@ -346,13 +354,15 @@ async def run_fixture(
                 tool=spec.name,
                 contract=contract,
                 contract_error=contract_error,
-                contract_stable=contract_stable,
+                contract_instability=contract_instability,
                 once=tuple(once),
                 twice=tuple(twice),
                 idempotence=idempotence,
                 effect=effect,
-                once_stable=_all_equal(fixture, [o.after for o in once if o.ok]),
-                twice_stable=_all_equal(fixture, [t.after for t in twice if t.ok]),
+                once_instability=_instability(fixture, [o for o in once if o.ok]),
+                twice_instability=_instability(fixture, [t for t in twice if t.ok]),
+                call_error=call_error,
+                errored_with_side_effects=side_effects,
             )
         )
 
@@ -363,8 +373,8 @@ async def run_fixture(
         reset=reset_result,
         coverage=coverage,
         controls=tuple(controls),
-        control_stable=control_stable,
         control_error=control_error,
+        control_instability=control_instability,
         control_effect=control_effect,
         listings=listings,
         listing_errors=listing_errors,
@@ -373,9 +383,41 @@ async def run_fixture(
     )
 
 
-def _all_equal(fixture: Fixture, states: Sequence[State]) -> bool:
-    normal = [normalized(fixture, s) for s in states]
-    return all(n == normal[0] for n in normal[1:])
+def _instability(fixture: Fixture, sessions: Sequence[Session]) -> tuple[Instability, ...]:
+    """Each session whose normalized end state differs from the first one's."""
+    if not sessions:
+        return ()
+    first = sessions[0]
+    found = []
+    for other in sessions[1:]:
+        item = instability_between((first.label, other.label), deltas(fixture, first.after, other.after))
+        if item is not None:
+            found.append(item)
+    return tuple(found)
+
+
+def _tool_errors(
+    fixture: Fixture, sessions: Sequence[Session], baseline: State | None
+) -> tuple[str | None, bool]:
+    """(call error, errored with side effects).
+
+    A call that returned ``isError: true`` is a CALL_ERROR only if it left no
+    trace. If state changed anyway, the session is judged on its state like
+    any other, and the evidence says it errored with side effects. Transport
+    errors are always CALL_ERROR: state after a dead connection is not a
+    completed call's state.
+    """
+    side_effects = False
+    for session in sessions:
+        if session.transport_error is not None:
+            return session.transport_error, side_effects
+        if session.tool_errored and session.ok:
+            reference = baseline if baseline is not None else session.before
+            if any(d.regions for d in deltas(fixture, reference, session.after)):
+                side_effects = True
+            else:
+                return f"{session.label}: tool returned isError with no state change", side_effects
+    return None, side_effects
 
 
 def _listings(
@@ -404,10 +446,17 @@ def _listings(
 
 def _contract_for(
     name: str, contract_sets: Sequence[dict[str, DeclaredContract]], errors: Sequence[str]
-) -> tuple[DeclaredContract | None, str | None, bool]:
+) -> tuple[DeclaredContract | None, str | None, tuple[str, ...]]:
+    """(contract, why there is none, hints that differed across sessions)."""
     seen = [cs[name] for cs in contract_sets if name in cs]
     if not seen:
         why = "; ".join(errors) if errors else f"tool {name!r} not in any tools/list response"
-        return None, why, False
-    stable = len(seen) == len(contract_sets) and all(c == seen[0] for c in seen)
-    return seen[0], None, stable
+        return None, why, ()
+    differing = [
+        a.wire_name for a in Annotation if len({c.hint(a) for c in seen}) > 1
+    ]
+    if len(seen) < len(contract_sets):
+        differing.append("(tool missing from some listings)")
+    elif not differing and any(c != seen[0] for c in seen):
+        differing.append("(annotation anomalies)")
+    return seen[0], None, tuple(differing)

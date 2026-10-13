@@ -54,13 +54,28 @@ def provenance(run: FixtureRun) -> CaptureProvenance:
     )
 
 
+def _verdict_text(outcome, reason) -> str:
+    return outcome.value + (f":{reason.value}" if reason else "")
+
+
 def expectation_check(verdict: Verdict, expected: Expectation) -> list[str]:
     """Differences between a verdict and its expectation; empty means it matched."""
     problems = []
     if verdict.outcome is not expected.outcome or verdict.reason is not expected.reason:
-        got = verdict.outcome.value + (f":{verdict.reason.value}" if verdict.reason else "")
-        want = expected.outcome.value + (f":{expected.reason.value}" if expected.reason else "")
-        problems.append(f"verdict {got}, expected {want}")
+        problems.append(
+            f"verdict {_verdict_text(verdict.outcome, verdict.reason)}, "
+            f"expected {_verdict_text(expected.outcome, expected.reason)}"
+        )
+    if expected.secondary is not None and set(verdict.secondary_reasons) != set(expected.secondary):
+        got = [r.value for r in verdict.secondary_reasons]
+        problems.append(f"secondary reasons {got}, expected {[r.value for r in expected.secondary]}")
+    if expected.behavior is not None and verdict.behavior is not expected.behavior:
+        problems.append(f"behavior {verdict.behavior.value}, expected {expected.behavior.value}")
+    if (
+        expected.errored_with_side_effects is not None
+        and verdict.errored_with_side_effects is not expected.errored_with_side_effects
+    ):
+        problems.append(f"errored_with_side_effects {verdict.errored_with_side_effects}")
     for flag, category in (
         ("business_changed", StateCategory.BUSINESS),
         ("append_only_changed", StateCategory.APPEND_ONLY),
@@ -99,7 +114,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
             {
                 "tool": ev.tool,
                 "contract": None if ev.contract is None else ev.contract.to_json(),
-                "contract_stable": ev.contract_stable,
+                "contract_instability": list(ev.contract_instability),
                 "coherence": [] if ev.contract is None else [i.value for i in coherence(ev.contract)],
                 "sessions": [s.to_json() for s in ev.once + ev.twice],
                 "verdicts": tool_verdicts,
@@ -116,6 +131,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
         "control": {
             "stable": run.control_stable,
             "error": run.control_error,
+            "nondeterminism": [i.to_json() for i in run.control_instability],
             "sessions": [s.to_json() for s in run.controls],
             "effect_vs_seed": [o.to_json() for o in run.control_effect],
         },
@@ -164,18 +180,20 @@ def render_text(report: dict[str, Any]) -> str:
     lines.append(f"  control sessions: {'stable' if report['control']['stable'] else 'UNSTABLE'}")
     if not report["listing"]["stable"]:
         lines.append("  tools/list: UNSTABLE across sessions")
-    header = f"  {'tool':<20} {'test':<24} {'declared':<10} {'verdict':<36} {'observed':<18} expected"
+    header = f"  {'tool':<20} {'test':<24} {'declared':<10} {'verdict':<44} {'observed':<26} expected"
     lines += ["", header, "  " + "-" * (len(header) - 2)]
     for tool in report["tools"]:
         if tool["coherence"]:
             lines.append(f"  {tool['tool']}: incoherent declaration: {', '.join(tool['coherence'])}")
         for v in tool["verdicts"]:
             verdict = v["outcome"] + (f":{v['reason']}" if v["reason"] else "")
+            if v["secondary_reasons"]:
+                verdict += " +" + ",".join(r.lower() for r in v["secondary_reasons"])
             observed = f"{v['observed']['property']}={v['observed']['behavior']}"
             exp = v.get("expected")
             mark = "-" if exp is None else ("ok" if exp["matched"] else "MISMATCH")
             lines.append(
-                f"  {tool['tool']:<20} {v['test']:<24} {v['declared']:<10} {verdict:<36} {observed:<18} {mark}"
+                f"  {tool['tool']:<20} {v['test']:<24} {v['declared']:<10} {verdict:<44} {observed:<26} {mark}"
             )
     exp = report["expectations"]
     lines.append("")

@@ -29,6 +29,7 @@ arguments = { key = "a", value = "new" }
 # against the control session.
 [tools.expected.sequential_idempotence]
 verdict = "PASS"
+secondary = []
 business_changed = false
 append_only_changed = true
 
@@ -39,11 +40,11 @@ append_only_changed = true
 
 # readOnlyHint:false and destructiveHint:true make no falsifiable claim.
 [tools.expected.read_only]
-verdict = "NOT_APPLICABLE"
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
 business_changed = true
 append_only_changed = true
 
 [tools.expected.destructive]
-verdict = "NOT_APPLICABLE"
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
 business_changed = true
 append_only_changed = true

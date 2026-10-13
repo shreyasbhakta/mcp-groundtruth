@@ -212,16 +212,41 @@ seeded state is reported as evidence.
 | concurrent idempotence | `idempotentHint` | once vs two concurrent calls | (build step 6) |
 
 `destructiveHint: false` means additive, not side-effect-free: additions of
-any kind never fail the destructive test. Idempotence and destructive changes
-seen only in unclassified regions give `UNCLASSIFIED_STATE`.
+any kind never fail the destructive test. Destruction is reported in two
+separate sub-categories, **business destruction** and **append-only
+destruction** (`observed.affected_categories`), so that, for example, log
+truncation can be counted apart from loss of business records. Either fails
+the test. Idempotence and destructive changes seen only in unclassified
+regions give `UNCLASSIFIED_STATE`.
 
-A declared hint is tested as stated, whatever the other hints say. Whether
-the declaration set is coherent is a separate check (below).
+### Explicit read-only supersedes the other tests
+
+When `readOnlyHint` is explicitly `true`, the destructive and idempotence
+tests are `NOT_APPLICABLE / SUPERSEDED_BY_READ_ONLY`, whatever
+`destructiveHint` and `idempotentHint` say. The read-only claim is the
+stronger one and is tested instead; observed behavior for the superseded
+tests is still attached. Only an explicit `true` triggers this: an absent or
+malformed `readOnlyHint` does not, and the other tests then proceed on their
+own declarations. Self-contradicting declaration sets are still reported by
+the coherence check.
+
+### Tool errors
+
+A call that returns `isError: true`:
+
+- **with no state change** (against the control state) → `CALL_ERROR`;
+- **with a state change** → judged on the state like any other call, and the
+  verdict's evidence sets `errored_with_side_effects`. Reporting failure does
+  not excuse a write.
+
+A JSON-RPC error response, or a connection that dies mid-call, is always
+`CALL_ERROR`. Side effects are judged per session, not per call: in a session
+that calls twice, they are attributed to the session as a whole.
 
 ## Verdicts
 
-Outcomes are `PASS`, `VIOLATION`, `INCONCLUSIVE` (with a reason code) and
-`NOT_APPLICABLE`.
+Outcomes are `PASS`, `VIOLATION`, `INCONCLUSIVE` and `NOT_APPLICABLE`.
+`INCONCLUSIVE` and `NOT_APPLICABLE` always carry a primary reason.
 
 ### Falsifiable declarations
 
@@ -229,40 +254,59 @@ Only three declared values make a claim behavior can contradict:
 `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`. The
 opposite values are permissive ("may write", "may destroy", "may not be
 idempotent"). No behavior can contradict them, so they get
-`NOT_APPLICABLE`, with the observed behavior still attached (e.g. "declared it
-may write; never wrote"). PASS therefore always means a claim that could have
-failed was tested and held.
+`NOT_APPLICABLE / PERMISSIVE_DECLARATION`, with the observed behavior still
+attached (e.g. "declared it may write; never wrote"). PASS therefore always
+means a claim that could have failed was tested and held.
 
 **Violation rates use only falsifiable declarations as the denominator.**
-Absent, malformed and permissive declarations are excluded from both
-numerator and denominator, and reported as separate counts.
+Absent, malformed, permissive and superseded declarations
+(`SUPERSEDED_BY_READ_ONLY`) are excluded from both numerator and denominator,
+and reported as separate counts.
+
+### Primary and secondary reasons
+
+Each verdict has one primary reason and a list of secondary reasons: every
+other problem found for that (tool, test). A `CALL_ERROR` therefore stays
+visible under `NO_DECLARATION`, and a VIOLATION observed with incomplete
+coverage carries `PARTIAL_COVERAGE` as a secondary reason. Each reason comes
+with a detail string in `issues`.
 
 ### Derivation order
 
-The first rule that applies decides:
+The primary reason is the first rule that applies:
 
-1. The declaration alone: absent → `NO_DECLARATION`; malformed →
-   `MALFORMED_DECLARATION`; permissive → `NOT_APPLICABLE`. These do not
+1. The declaration alone: for the destructive and idempotence tests,
+   explicit `readOnlyHint: true` → `NOT_APPLICABLE / SUPERSEDED_BY_READ_ONLY`;
+   absent → `NO_DECLARATION`; malformed → `MALFORMED_DECLARATION`;
+   permissive → `NOT_APPLICABLE / PERMISSIVE_DECLARATION`. These do not
    depend on whether the run went well, so they are comparable with
    declaration censuses.
 2. Whether the harness can trust its observations: reset failed →
    `SETUP_FAILED`; reset unverified → `RESET_UNVERIFIED`; a session failed to
-   start or list → `SETUP_FAILED`; a call returned a JSON-RPC error,
-   `isError: true`, or the connection died → `CALL_ERROR`; the declared
-   contract differed across sessions → `NONDETERMINISTIC`; the control
-   sessions disagree (read-only and destructive only) → `NONDETERMINISTIC`;
-   fewer than 3 complete runs → `NONDETERMINISTIC`.
-3. What was observed: runs disagree, or the once/twice states differ across
-   runs after normalization → `NONDETERMINISTIC`; behavior fails in every run
-   → `VIOLATION`; only unclassified state bears on it →
-   `UNCLASSIFIED_STATE`; coverage incomplete → `PARTIAL_COVERAGE`; otherwise
-   `PASS`.
+   start or list → `SETUP_FAILED`; a transport error, or `isError` with no
+   state change → `CALL_ERROR`; the declared contract differed across
+   sessions → `NONDETERMINISTIC`; sessions that should end in the same state
+   did not (control sessions for read-only and destructive; once and twice
+   sessions across runs) → `NONDETERMINISTIC`; fewer than 3 complete runs →
+   `NONDETERMINISTIC`.
+3. What was observed: behavior fails in every run → `VIOLATION`; only
+   unclassified state bears on it → `UNCLASSIFIED_STATE`; coverage
+   incomplete → `PARTIAL_COVERAGE`; otherwise `PASS`.
 
 A VIOLATION may be issued with incomplete coverage, because the contradiction
 was observed on state the adapter does see. A PASS never can.
 
+### Evidence
+
 Every verdict carries the full tri-state contract, the observed property and
-behavior, per-run deltas by state category, coverage, and run count.
+behavior, the affected state categories, `errored_with_side_effects`,
+per-run deltas by state category, coverage, run count, and primary and
+secondary reasons with details.
+
+`NONDETERMINISTIC` evidence names what differed: for each pair of sessions
+that should have matched, the `surface/region.column` columns whose values
+still differ after normalization, and how many rows were added and removed.
+The hints that differed are named when a declared contract is unstable.
 
 ### Declaration coherence
 
@@ -291,6 +335,9 @@ against its expectation and exits non-zero on any mismatch.
 9. `malformed-hints`: a hand-written JSON-RPC server (no SDK), because the
    SDK server cannot emit malformed hints. It exercises
    `MALFORMED_DECLARATION` end to end.
+10. `liar-readonly-error`: declares `readOnlyHint: true`, writes a side table,
+    then returns `isError: true`. Expected VIOLATION with
+    `errored_with_side_effects`.
 
 ## Planned, not yet implemented
 
