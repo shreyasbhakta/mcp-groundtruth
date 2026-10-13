@@ -108,15 +108,97 @@ A dirty working tree means the SHA does not pin the code; the content digest
 does. Determinism is required of verdicts and observed deltas, not of capture
 metadata such as timestamps.
 
+## Observing state
+
+### Snapshots
+
+Each fixture declares its observation surfaces (`src/mcpgt/snapshot.py`). A
+snapshot is a set of named regions; for SQLite, one per table plus `@schema`
+(every table, index, view and trigger definition) and `@pragma`
+(`user_version`, `application_id`). Rows are stored as a sorted multiset:
+insertion order does not matter, and duplicate rows are counted, never
+collapsed. Values keep their SQLite storage class, so `1`, `1.0` and `"1"`
+are distinct. Physical layout (hidden rowids, page order) is not state.
+
+Snapshots are read through a read-only connection in a single transaction.
+
+### Coverage
+
+Each fixture declares every location where its server keeps state (ground
+truth). Coverage is complete only if every location is observed by an adapter
+that itself sees all of it (an adapter configured to skip a table does not).
+A tool on a fixture with incomplete coverage can never PASS.
+
+### State classification
+
+The fixture classifies each region as **business** or **append-only**.
+Nothing is inferred. A region the fixture did not classify (including a table
+a tool creates) is **unclassified** and reported separately.
+
+How unclassified changes affect verdicts:
+
+- **Idempotence and destructive tests** make claims about business state. If
+  the only observed change is in an unclassified region, the verdict is
+  `INCONCLUSIVE / UNCLASSIFIED_STATE`.
+- **Read-only test**: `readOnlyHint: true` claims no state changes at all, so
+  a change in any observed region, classified or not, is eligible for
+  VIOLATION.
+
+### Deltas
+
+A delta between two snapshots is a per-region multiset difference: records
+added, and pre-existing records removed. An overwrite appears as one removal
+plus one addition. "Destructive" means some pre-existing record is no longer
+present unchanged.
+
+## Normalization
+
+Before comparison, declared volatile columns (timestamps, UUIDs,
+autoincrement keys, random tokens) are masked (`src/mcpgt/normalize.py`).
+Rules name an exact region and column and come only from fixture config; a
+column named `created_at` is compared verbatim unless a rule says otherwise.
+A masked column is masked entirely, nulls included.
+
+Every rule is checked against the seeded state before any test runs. A rule
+that names a missing region or column fails setup. Without this check, a typo
+would leave a volatile column unmasked, its values would differ on every run,
+and that difference would reproduce reliably enough to look like a violation.
+
+Fixture definitions are parsed strictly: unknown keys are errors, for the
+same reason.
+
+## Reset verification
+
+Before any test runs on a fixture: reset, snapshot, reset, snapshot. The two
+snapshots must be identical after normalization (`mcpgt verify-reset`). If
+they are not, every verdict for that fixture is
+`INCONCLUSIVE / RESET_UNVERIFIED`, and the differing records are reported.
+A reset that fails outright (bad seed, missing surface, bad mask rule) is
+`SETUP_FAILED`.
+
+Fixture servers run with a fixed, minimal environment (`PYTHONHASHSEED=0`,
+no bytecode writes into the fixture directory, only `PATH`/`HOME` inherited).
+
 ## Planned, not yet implemented
 
+- **Control session** (runner): a session that starts the server,
+  initializes, lists tools and stops without calling anything. Single-call
+  states are compared against this control rather than the bare seed, so
+  writes caused by the server's startup or shutdown are not attributed to the
+  tool under test.
+- **Declared hints that make no falsifiable claim** (`readOnlyHint: false`,
+  `idempotentHint: false`, `destructiveHint: true`): the verdict rule is
+  undecided.
 - **Declaration coherence checks** (verdict derivation): flag declaration sets
   that contradict themselves, e.g. `readOnlyHint: true` with
   `destructiveHint: true` or `idempotentHint: false`. Recorded and reported
   separately from behavior; never corrected.
-- **Listing stability**: follow `nextCursor` to the end, and record as an
-  anomaly any server whose tool set differs across successive `tools/list`
-  calls.
-- Observation surfaces, state classification, normalization, the test
-  battery, verdict rules and reset verification are specified in the project
-  brief and will be documented here as each is built.
+- **Listing stability**: `nextCursor` is followed to the end (implemented in
+  `src/mcpgt/wire.py`, which also rejects cursor loops). Still to do: record
+  as an anomaly any server whose tool set differs across successive
+  `tools/list` calls.
+- **Reader divergence, recorded per server** (for the later audit of real
+  servers, not release 0.1): alongside the strict contract, record what the
+  pinned SDK client would have returned for the same bytes, including the
+  case where the SDK returns no tools at all because one tool failed
+  validation.

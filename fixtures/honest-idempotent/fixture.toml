@@ -1,0 +1,38 @@
+[fixture]
+name = "honest-idempotent"
+description = "Upsert by key. Idempotent over business state; appends one audit row per call."
+# {python} is the harness's interpreter, which has the MCP SDK installed.
+command = ["{python}", "server.py"]
+
+[state]
+# Ground truth: every place this server keeps state. Coverage is complete only
+# if each location is observed by an adapter whose own coverage is complete.
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["items"]
+append_only = ["audit"]
+mask = [
+    { region = "audit", column = "at", kind = "timestamp" },
+    { region = "audit", column = "request_id", kind = "uuid" },
+]
+
+[[tools]]
+name = "upsert_item"
+arguments = { key = "a", value = "new" }
+
+# Expected verdicts. read_only and destructive are not yet specified: they wait
+# on the verdict rule for declared hints that make no falsifiable claim
+# (readOnlyHint:false, destructiveHint:true).
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+business_changed = false
+append_only_changed = true
+
+[tools.expected.concurrent_idempotence]
+verdict = "PASS"
+business_changed = false
+append_only_changed = true

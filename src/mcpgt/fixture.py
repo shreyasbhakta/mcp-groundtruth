@@ -1,0 +1,260 @@
+"""Fixture definitions: ``fixtures/<name>/fixture.toml``.
+
+Parsing is strict. An unknown key is an error, not ignored, because a typo in
+a classification or mask rule silently changes what gets compared, and that
+is how false accusations get made.
+"""
+
+from __future__ import annotations
+
+import sys
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from mcpgt.normalize import MaskRule, Normalizer, VolatileKind
+from mcpgt.snapshot import Classification, Coverage, SnapshotAdapter, SQLiteAdapter
+from mcpgt.verdict import InconclusiveReason, Outcome, TestKind
+
+FIXTURES_DIR = Path("fixtures")
+
+
+class FixtureError(ValueError):
+    """The fixture definition is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterSpec:
+    kind: str
+    label: str
+    seed: str | None
+    exclude: tuple[str, ...]
+    classification: Classification
+    normalizer: Normalizer
+
+    @property
+    def surface(self) -> str:
+        return f"{self.kind}:{self.label}"
+
+    def build(self, state_dir: Path) -> SnapshotAdapter:
+        return SQLiteAdapter(state_dir / self.label, label=self.label, exclude=self.exclude)
+
+
+@dataclass(frozen=True, slots=True)
+class Expectation:
+    outcome: Outcome
+    reason: InconclusiveReason | None
+    business_changed: bool | None
+    append_only_changed: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    name: str
+    arguments: Mapping[str, Any]
+    expected: Mapping[TestKind, Expectation]
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureCoverage:
+    adapters: tuple[Coverage, ...]
+    unobserved: tuple[str, ...]  # declared state locations no adapter observes
+
+    @property
+    def complete(self) -> bool:
+        return not self.unobserved and all(c.complete for c in self.adapters)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "complete": self.complete,
+            "unobserved_locations": list(self.unobserved),
+            "adapters": [c.to_json() for c in self.adapters],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Fixture:
+    name: str
+    root: Path
+    description: str
+    command: tuple[str, ...]
+    locations: tuple[str, ...]
+    adapters: tuple[AdapterSpec, ...]
+    tools: tuple[ToolSpec, ...]
+
+    def server_command(self) -> list[str]:
+        return [sys.executable if part == "{python}" else part for part in self.command]
+
+    def build_adapters(self, state_dir: Path) -> list[SnapshotAdapter]:
+        return [spec.build(state_dir) for spec in self.adapters]
+
+    def adapter_spec(self, surface: str) -> AdapterSpec:
+        for spec in self.adapters:
+            if spec.surface == surface:
+                return spec
+        raise KeyError(surface)
+
+    def coverage(self, state_dir: Path) -> FixtureCoverage:
+        observed = {spec.surface for spec in self.adapters}
+        return FixtureCoverage(
+            adapters=tuple(a.coverage() for a in self.build_adapters(state_dir)),
+            unobserved=tuple(loc for loc in self.locations if loc not in observed),
+        )
+
+    def source_files(self) -> list[Path]:
+        return sorted(
+            p for p in self.root.rglob("*") if p.is_file() and "__pycache__" not in p.parts
+        )
+
+
+def resolve(name_or_path: str | Path) -> Path:
+    path = Path(name_or_path)
+    if (path / "fixture.toml").is_file():
+        return path
+    candidate = FIXTURES_DIR / str(name_or_path)
+    if (candidate / "fixture.toml").is_file():
+        return candidate
+    raise FixtureError(f"no fixture at {path} or {candidate}")
+
+
+def load(name_or_path: str | Path) -> Fixture:
+    root = resolve(name_or_path).resolve()
+    try:
+        data = tomllib.loads((root / "fixture.toml").read_text())
+    except tomllib.TOMLDecodeError as exc:
+        raise FixtureError(f"{root}/fixture.toml: {exc}") from exc
+    _keys(data, "fixture.toml", required={"fixture", "state", "adapters"}, optional={"tools"})
+
+    meta = data["fixture"]
+    _keys(meta, "[fixture]", required={"name", "command"}, optional={"description"})
+    state = data["state"]
+    _keys(state, "[state]", required={"locations"})
+
+    adapters = tuple(_adapter(a, root) for a in _list(data["adapters"], "adapters"))
+    surfaces = [a.surface for a in adapters]
+    locations = tuple(_strs(state["locations"], "state.locations"))
+    if len(set(surfaces)) != len(surfaces):
+        raise FixtureError("two adapters observe the same surface")
+    for surface in surfaces:
+        if surface not in locations:
+            raise FixtureError(f"adapter surface {surface!r} is not a declared state location")
+
+    tools = tuple(_tool(t) for t in _list(data.get("tools", []), "tools"))
+    if len({t.name for t in tools}) != len(tools):
+        raise FixtureError("duplicate tool entries")
+
+    return Fixture(
+        name=_str(meta["name"], "fixture.name"),
+        root=root,
+        description=_str(meta.get("description", ""), "fixture.description"),
+        command=tuple(_strs(meta["command"], "fixture.command")),
+        locations=locations,
+        adapters=adapters,
+        tools=tools,
+    )
+
+
+def _adapter(data: Any, root: Path) -> AdapterSpec:
+    where = "[[adapters]]"
+    _keys(
+        data,
+        where,
+        required={"kind", "label"},
+        optional={"seed", "exclude", "business", "append_only", "mask"},
+    )
+    if data["kind"] != "sqlite":
+        raise FixtureError(f"{where}: unsupported adapter kind {data['kind']!r}")
+    seed = data.get("seed")
+    if seed is not None and not (root / _str(seed, f"{where}.seed")).is_file():
+        raise FixtureError(f"{where}: seed file {seed!r} not found")
+    try:
+        classification = Classification(
+            business=frozenset(_strs(data.get("business", []), f"{where}.business")),
+            append_only=frozenset(_strs(data.get("append_only", []), f"{where}.append_only")),
+        )
+    except ValueError as exc:
+        raise FixtureError(f"{where}: {exc}") from exc
+    rules = []
+    for rule in _list(data.get("mask", []), f"{where}.mask"):
+        _keys(rule, f"{where}.mask", required={"region", "column", "kind"})
+        try:
+            kind = VolatileKind(rule["kind"])
+        except ValueError as exc:
+            raise FixtureError(f"{where}.mask: unknown kind {rule['kind']!r}") from exc
+        rules.append(MaskRule(_str(rule["region"], "region"), _str(rule["column"], "column"), kind))
+    return AdapterSpec(
+        kind="sqlite",
+        label=_str(data["label"], f"{where}.label"),
+        seed=seed,
+        exclude=tuple(_strs(data.get("exclude", []), f"{where}.exclude")),
+        classification=classification,
+        normalizer=Normalizer.of(rules),
+    )
+
+
+def _tool(data: Any) -> ToolSpec:
+    where = "[[tools]]"
+    _keys(data, where, required={"name"}, optional={"arguments", "expected"})
+    expected: dict[TestKind, Expectation] = {}
+    raw_expected = data.get("expected", {})
+    if not isinstance(raw_expected, Mapping):
+        raise FixtureError(f"{where}.expected must be a table")
+    for test_name, spec in raw_expected.items():
+        try:
+            test = TestKind(test_name)
+        except ValueError as exc:
+            raise FixtureError(f"{where}.expected: unknown test {test_name!r}") from exc
+        expected[test] = _expectation(spec, f"{where}.expected.{test_name}")
+    arguments = data.get("arguments", {})
+    if not isinstance(arguments, Mapping):
+        raise FixtureError(f"{where}.arguments must be a table")
+    return ToolSpec(name=_str(data["name"], f"{where}.name"), arguments=dict(arguments), expected=expected)
+
+
+def _expectation(data: Any, where: str) -> Expectation:
+    _keys(data, where, required={"verdict"}, optional={"business_changed", "append_only_changed"})
+    # "PASS", "VIOLATION", or "INCONCLUSIVE:<REASON>"
+    outcome_text, _, reason_text = _str(data["verdict"], where).partition(":")
+    try:
+        outcome = Outcome(outcome_text)
+        reason = InconclusiveReason(reason_text) if reason_text else None
+    except ValueError as exc:
+        raise FixtureError(f"{where}: bad verdict {data['verdict']!r}") from exc
+    if (outcome is Outcome.INCONCLUSIVE) != (reason is not None):
+        raise FixtureError(f"{where}: INCONCLUSIVE needs a reason, and only it may have one")
+    flags = {}
+    for key in ("business_changed", "append_only_changed"):
+        value = data.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise FixtureError(f"{where}.{key} must be a boolean")
+        flags[key] = value
+    return Expectation(outcome=outcome, reason=reason, **flags)
+
+
+def _keys(data: Any, where: str, required: set[str], optional: set[str] = frozenset()) -> None:
+    if not isinstance(data, Mapping):
+        raise FixtureError(f"{where} must be a table")
+    missing = required - data.keys()
+    unknown = data.keys() - required - optional
+    if missing:
+        raise FixtureError(f"{where}: missing {sorted(missing)}")
+    if unknown:
+        raise FixtureError(f"{where}: unknown keys {sorted(unknown)}")
+
+
+def _list(value: Any, where: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise FixtureError(f"{where} must be an array")
+    return value
+
+
+def _str(value: Any, where: str) -> str:
+    if not isinstance(value, str):
+        raise FixtureError(f"{where} must be a string, got {value!r}")
+    return value
+
+
+def _strs(value: Any, where: str) -> list[str]:
+    return [_str(v, where) for v in _list(value, where)]
