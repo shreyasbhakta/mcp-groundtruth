@@ -24,9 +24,9 @@ mask = [
 name = "upsert_item"
 arguments = { key = "a", value = "new" }
 
-# Expected verdicts. read_only and destructive are not yet specified: they wait
-# on the verdict rule for declared hints that make no falsifiable claim
-# (readOnlyHint:false, destructiveHint:true).
+# Expected verdicts. For the idempotence tests the *_changed flags compare one
+# call against two; for read_only and destructive they compare one call
+# against the control session.
 [tools.expected.sequential_idempotence]
 verdict = "PASS"
 business_changed = false
@@ -35,4 +35,15 @@ append_only_changed = true
 [tools.expected.concurrent_idempotence]
 verdict = "PASS"
 business_changed = false
+append_only_changed = true
+
+# readOnlyHint:false and destructiveHint:true make no falsifiable claim.
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE"
+business_changed = true
+append_only_changed = true
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE"
+business_changed = true
 append_only_changed = true

@@ -179,24 +179,122 @@ A reset that fails outright (bad seed, missing surface, bad mask rule) is
 Fixture servers run with a fixed, minimal environment (`PYTHONHASHSEED=0`,
 no bytecode writes into the fixture directory, only `PATH`/`HOME` inherited).
 
+## Sessions and runs
+
+Every session starts from a clean reset and runs the same prefix: start the
+server, `initialize`, `tools/list` (every page). Then:
+
+- a **control session** stops there;
+- a **once** session calls the tool one time;
+- a **twice** session calls it two times, sequentially.
+
+The server is then shut down and state observed, so writes made at shutdown
+are captured. Each test is repeated over at least 3 independent runs
+(`--runs`, minimum 3), each from its own reset.
+
+### Control session
+
+The control session isolates the tool's effect from the server's own startup
+and shutdown writes. It runs 3 times (once per run). The three control
+states must be identical after normalization. If they are not, the read-only
+and destructive verdicts for that server are
+`INCONCLUSIVE / NONDETERMINISTIC`; the idempotence verdicts, which never
+compare against the control, are unaffected. The control's own effect on the
+seeded state is reported as evidence.
+
+## Test battery
+
+| Test | Hint | Compares | Behavior fails when |
+|---|---|---|---|
+| sequential idempotence | `idempotentHint` | once vs twice, each from clean reset | business state differs |
+| read-only | `readOnlyHint` | control vs once | any observed state differs: business, append-only or unclassified |
+| destructive | `destructiveHint` | control vs once | a pre-existing business or append-only record is gone or overwritten |
+| concurrent idempotence | `idempotentHint` | once vs two concurrent calls | (build step 6) |
+
+`destructiveHint: false` means additive, not side-effect-free: additions of
+any kind never fail the destructive test. Idempotence and destructive changes
+seen only in unclassified regions give `UNCLASSIFIED_STATE`.
+
+A declared hint is tested as stated, whatever the other hints say. Whether
+the declaration set is coherent is a separate check (below).
+
+## Verdicts
+
+Outcomes are `PASS`, `VIOLATION`, `INCONCLUSIVE` (with a reason code) and
+`NOT_APPLICABLE`.
+
+### Falsifiable declarations
+
+Only three declared values make a claim behavior can contradict:
+`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`. The
+opposite values are permissive ("may write", "may destroy", "may not be
+idempotent"). No behavior can contradict them, so they get
+`NOT_APPLICABLE`, with the observed behavior still attached (e.g. "declared it
+may write; never wrote"). PASS therefore always means a claim that could have
+failed was tested and held.
+
+**Violation rates use only falsifiable declarations as the denominator.**
+Absent, malformed and permissive declarations are excluded from both
+numerator and denominator, and reported as separate counts.
+
+### Derivation order
+
+The first rule that applies decides:
+
+1. The declaration alone: absent → `NO_DECLARATION`; malformed →
+   `MALFORMED_DECLARATION`; permissive → `NOT_APPLICABLE`. These do not
+   depend on whether the run went well, so they are comparable with
+   declaration censuses.
+2. Whether the harness can trust its observations: reset failed →
+   `SETUP_FAILED`; reset unverified → `RESET_UNVERIFIED`; a session failed to
+   start or list → `SETUP_FAILED`; a call returned a JSON-RPC error,
+   `isError: true`, or the connection died → `CALL_ERROR`; the declared
+   contract differed across sessions → `NONDETERMINISTIC`; the control
+   sessions disagree (read-only and destructive only) → `NONDETERMINISTIC`;
+   fewer than 3 complete runs → `NONDETERMINISTIC`.
+3. What was observed: runs disagree, or the once/twice states differ across
+   runs after normalization → `NONDETERMINISTIC`; behavior fails in every run
+   → `VIOLATION`; only unclassified state bears on it →
+   `UNCLASSIFIED_STATE`; coverage incomplete → `PARTIAL_COVERAGE`; otherwise
+   `PASS`.
+
+A VIOLATION may be issued with incomplete coverage, because the contradiction
+was observed on state the adapter does see. A PASS never can.
+
+Every verdict carries the full tri-state contract, the observed property and
+behavior, per-run deltas by state category, coverage, and run count.
+
+### Declaration coherence
+
+Reported per tool, separately from verdicts, never corrected:
+`readOnlyHint: true` with `destructiveHint: true`
+(`read_only_and_destructive`), and `readOnlyHint: true` with
+`idempotentHint: false` (`read_only_not_idempotent`). An absent hint is
+never treated as either value here.
+
+### Listing stability
+
+`nextCursor` is followed to the end; cursor loops are rejected. Each
+session's listing is parsed and compared. A tool whose contract differs
+between sessions gets `NONDETERMINISTIC`, and every distinct listing is kept
+in the report, raw, with the sessions that returned it.
+
+## Fixtures
+
+Release 0.1 is correct when every fixture produces exactly its expected
+verdicts, recorded in its `fixture.toml`. `mcpgt run` checks each verdict
+against its expectation and exits non-zero on any mismatch.
+
+1. `honest-readonly`, 2. `honest-idempotent`, 3. `liar-idempotent`,
+4. `liar-concurrent`, 5. `liar-readonly`, 6. `silent-safe`, 7. `opaque`,
+8. `flaky`: as specified in the project brief.
+9. `malformed-hints`: a hand-written JSON-RPC server (no SDK), because the
+   SDK server cannot emit malformed hints. It exercises
+   `MALFORMED_DECLARATION` end to end.
+
 ## Planned, not yet implemented
 
-- **Control session** (runner): a session that starts the server,
-  initializes, lists tools and stops without calling anything. Single-call
-  states are compared against this control rather than the bare seed, so
-  writes caused by the server's startup or shutdown are not attributed to the
-  tool under test.
-- **Declared hints that make no falsifiable claim** (`readOnlyHint: false`,
-  `idempotentHint: false`, `destructiveHint: true`): the verdict rule is
-  undecided.
-- **Declaration coherence checks** (verdict derivation): flag declaration sets
-  that contradict themselves, e.g. `readOnlyHint: true` with
-  `destructiveHint: true` or `idempotentHint: false`. Recorded and reported
-  separately from behavior; never corrected.
-- **Listing stability**: `nextCursor` is followed to the end (implemented in
-  `src/mcpgt/wire.py`, which also rejects cursor loops). Still to do: record
-  as an anomaly any server whose tool set differs across successive
-  `tools/list` calls.
+- **Concurrent idempotence** (build step 6).
 - **Reader divergence, recorded per server** (for the later audit of real
   servers, not release 0.1): alongside the strict contract, record what the
   pinned SDK client would have returned for the same bytes, including the
