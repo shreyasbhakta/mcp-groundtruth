@@ -88,7 +88,10 @@ def portable_command(command: Sequence[str], target_dir: Path, cwd: Path | None 
 
 def _expand(part: str, state_dir: Path, target_dir: Path) -> str:
     values = {"python": sys.executable, "state": str(state_dir.resolve()), "target": str(target_dir.resolve())}
-    return _PLACEHOLDER.sub(lambda m: values[m.group(1)], part)
+    expanded = _PLACEHOLDER.sub(lambda m: values[m.group(1)], part)
+    # The target directory may not exist yet, so "{target}/../x" is normalized
+    # lexically rather than left for the OS to traverse.
+    return os.path.normpath(expanded) if part.startswith("{target}") else expanded
 
 
 async def discover(
@@ -117,7 +120,8 @@ async def discover(
             pages = await client.list_tools()
         except Exception as exc:
             stderr = client.stderr.strip()
-            raise InitError(f"{exc}" + (f"\nserver stderr:\n{stderr}" if stderr else "")) from exc
+            detail = f"\nserver stderr:\n{stderr}" if stderr and stderr not in str(exc) else ""
+            raise InitError(f"{exc}{detail}") from exc
         finally:
             await client.close()
     texts = [p.text for p in pages]
