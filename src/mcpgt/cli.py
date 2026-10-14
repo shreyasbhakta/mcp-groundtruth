@@ -17,7 +17,7 @@ from mcpgt.runner import run_fixture, verify_reset
 from mcpgt.sandbox import IsolationUnavailable
 from mcpgt.sources import SourceError
 from mcpgt.sources import prepare as prepare_source
-from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, ResetStatus, derive
+from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, Outcome, ResetStatus, derive
 
 EXIT_OK, EXIT_UNEXPECTED, EXIT_USAGE = 0, 1, 2
 
@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         "--observe-concurrent",
         action="store_true",
         help="also run concurrent attempts for tools without a falsifiable idempotence claim (observation only)",
+    )
+    run.add_argument(
+        "--fail-on-violation",
+        action="store_true",
+        help="exit 1 if any verdict is VIOLATION (for gating CI); --audit alone always exits 0",
     )
     run.add_argument("--runs-dir", type=Path, default=reports.RUNS_DIR, help="where reports are written")
 
@@ -209,6 +214,15 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
     path = reports.write(report, args.runs_dir)
     print(reports.render_text(report))
     print(f"\nreport: {path}")
+    violations = [
+        f"{tool['tool']} {verdict['test']}"
+        for tool in report["tools"]
+        for verdict in tool["verdicts"]
+        if verdict["outcome"] == Outcome.VIOLATION.value
+    ]
+    if args.fail_on_violation and violations:
+        print(f"failing: {len(violations)} VIOLATION verdict(s): {', '.join(violations)}", file=sys.stderr)
+        return EXIT_UNEXPECTED
     if args.audit:
         return EXIT_OK
     return EXIT_OK if not report["expectations"]["mismatches"] else EXIT_UNEXPECTED

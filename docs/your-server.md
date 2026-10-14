@@ -223,7 +223,8 @@ report: runs/20261014T051500665179Z-notes/report.json
 ```
 
 `--audit` exits 0 whatever the verdicts: an audit is a measurement for you
-to review.
+to review. Add `--fail-on-violation` to exit 1 when any verdict is VIOLATION
+(see [Gate releases in CI](#7-gate-releases-in-ci)).
 
 ## 6. Read the report
 
@@ -269,6 +270,60 @@ When a verdict surprises you, check the evidence before concluding anything:
   or an adapter cannot see everything in it.
 - **VIOLATION:** reproduce it by hand from the logged calls before reporting
   it to anyone else.
+
+## 7. Gate releases in CI
+
+Once the target is in your repository, you can make the build fail when a
+tool's behavior contradicts its annotations. This repository is also a
+composite GitHub Action:
+
+```yaml
+jobs:
+  annotations:
+    runs-on: macos-15            # full sandbox; see below for Linux
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci && npm run build   # build your server first: audits have no network
+      - uses: shreyasbhakta/mcp-groundtruth@<commit-sha>   # pin a commit or release tag
+        with:
+          target: mcpgt/my-server      # the directory holding target.toml
+```
+
+The action installs mcp-groundtruth from the ref you pin and runs
+`mcpgt run <target> --audit --fail-on-violation`. The step fails on any
+VIOLATION, or if the audit itself cannot run. The report directory is
+uploaded as an artifact either way. Inputs:
+
+| Input | Default | |
+|---|---|---|
+| `target` | (required) | Path to the target directory. |
+| `fail-on-violation` | `true` | `false` reports without failing. |
+| `args` | | Extra `mcpgt run` arguments, such as `--tool add_note`. |
+| `python-version` | `3.12` | Python for mcp-groundtruth. |
+| `upload-report` | `true` | Upload the report directory as an artifact. |
+| `artifact-name` | `mcpgt-report` | Must be unique within a workflow run, for example per matrix job. |
+
+Outputs: `report` (the path to `report.json`) and `violations` (the count).
+
+INCONCLUSIVE verdicts never fail the step: they mean the evidence could not
+decide. Review them in the report.
+
+On GitHub's Ubuntu 24.04 runners, AppArmor blocks the unprivileged user
+namespaces the Linux sandbox needs. Run on macOS, or allow them on the
+(throwaway) runner before the audit step:
+
+```yaml
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+The Linux sandbox blocks the network but does not confine file writes.
+
+Without the action, the same gate is two commands in any CI system:
+
+```bash
+pip install mcp-groundtruth
+mcpgt run mcpgt/my-server --audit --fail-on-violation
+```
 
 ## Troubleshooting
 

@@ -46,3 +46,38 @@ jobs:
       - run: uv sync --locked
       - run: uv run mcpgt --version
       - run: uv run pytest -ra
+
+  action:
+    # The reusable action (action.yml) against the example server, whose one
+    # known VIOLATION must fail the gate.
+    name: Audit action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Allow unprivileged user namespaces for the Linux sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - id: gate
+        uses: ./
+        continue-on-error: true
+        with:
+          target: examples/notes
+          artifact-name: mcpgt-report-${{ matrix.os }}
+      - name: The known violation failed the gate
+        env:
+          OUTCOME: ${{ steps.gate.outcome }}
+          VIOLATIONS: ${{ steps.gate.outputs.violations }}
+        run: |
+          test "$OUTCOME" = failure
+          test "$VIOLATIONS" = 1
+      - name: Without fail-on-violation the audit only reports
+        uses: ./
+        with:
+          target: examples/notes
+          fail-on-violation: "false"
+          upload-report: "false"

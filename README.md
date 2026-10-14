@@ -164,7 +164,8 @@ uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from so
 ```
 
 To test your own server, follow [Test your own MCP server](docs/your-server.md),
-which walks a small example server from `mcpgt init` to a report.
+which walks a small example server from `mcpgt init` to a report and shows
+how to gate CI on it with this repository's GitHub Action.
 To run this repository's fixtures, use a checkout and
 [uv](https://docs.astral.sh/uv/):
 
@@ -206,7 +207,7 @@ constraint. Sequential calls look idempotent. Concurrent calls both insert.
 | `mcpgt verify-reset <fixture> [--json]` | Reset twice and confirm identical normalized state. |
 | `mcpgt run <fixture> [--tool NAME] [--runs N] [--concurrent-attempts N] [--runs-dir DIR]` | Run the test battery, write a JSON report, print a summary. |
 | `mcpgt prepare <target>` | Fetch and build an audit target's pinned source (the only networked step). |
-| `mcpgt run <target> --audit [--observe-concurrent]` | Audit a third-party server: no expected verdicts, sandboxed, always exits 0. `--observe-concurrent` adds observation-only concurrent attempts for tools without a falsifiable idempotence claim. |
+| `mcpgt run <target> --audit [--observe-concurrent] [--fail-on-violation]` | Audit a server: no expected verdicts, sandboxed. Exits 0 whatever the verdicts, unless `--fail-on-violation` is given. `--observe-concurrent` adds observation-only concurrent attempts for tools without a falsifiable idempotence claim. |
 | `mcpgt report <run-id> [--format text\|json] [--runs-dir DIR]` | Show a saved report. |
 | `mcpgt --version` | Print the version. |
 
@@ -219,7 +220,7 @@ takes a tool name (all its argument variants) or one variant as
 | Exit code | Meaning |
 |---|---|
 | `0` | Success: every verdict matched its expectation (`run`), or reset verified (`verify-reset`). |
-| `1` | A verdict did not match its expectation (`run`), or reset not verified (`verify-reset`). |
+| `1` | A verdict did not match its expectation (`run`), any verdict is VIOLATION (`run --fail-on-violation`), or reset not verified (`verify-reset`). |
 | `2` | Invalid fixture definition, arguments, or run id. |
 
 ---

@@ -340,3 +340,25 @@ def test_reports_record_adapter_modelling_notes():
     (_, graph) = (a.to_json() for a in fx.adapters)
     assert graph["explode"] == {"observations": ["name"]}
     assert "Modelling choice" in graph["notes"]
+
+
+# --- Gating CI on violations -------------------------------------------------------
+
+
+def test_fail_on_violation_turns_a_violation_into_exit_1(tmp_path, capsys):
+    runs = ["--runs-dir", str(tmp_path / "runs"), "--concurrent-attempts", "2"]
+    liar = str(FIXTURES / "liar-idempotent")
+    assert main(["run", liar, *runs]) == 0  # the VIOLATION is this fixture's expected verdict
+    assert main(["run", liar, *runs, "--fail-on-violation"]) == 1
+    assert (
+        "failing: 2 VIOLATION verdict(s): add_item sequential_idempotence, add_item concurrent_idempotence"
+        in capsys.readouterr().err
+    )
+    assert main(["run", str(FIXTURES / "honest-readonly"), *runs, "--fail-on-violation"]) == 0
+
+
+@needs_isolation
+def test_audit_fails_on_violation_only_when_asked(liar_target, tmp_path):
+    args = ["run", str(liar_target), "--audit", "--concurrent-attempts", "2", "--runs-dir", str(tmp_path / "runs")]
+    assert main(args) == 0
+    assert main([*args, "--fail-on-violation"]) == 1

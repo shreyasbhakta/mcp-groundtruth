@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `--fail-on-violation`: `mcpgt run` exits 1 if any verdict is VIOLATION,
+  for gating CI; `--audit` alone still always exits 0.
+- A composite GitHub Action (`action.yml`) that audits a target and fails
+  the job on any VIOLATION, uploading the report as an artifact. CI runs it
+  against `examples/notes` on Ubuntu and macOS.
 - [docs/your-server.md](docs/your-server.md): testing your own server from
   install to report, using `examples/notes`, a small SQLite-backed server with
   one deliberate annotation bug.

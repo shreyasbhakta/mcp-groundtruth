@@ -1,0 +1,75 @@
+name: mcp-groundtruth audit
+description: Audit an MCP server's tool annotations against its observed behavior, and fail on any VIOLATION.
+author: Shreyas Bhakta
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  target:
+    description: Path to the target directory (the one holding target.toml).
+    required: true
+  fail-on-violation:
+    description: Fail the step if any verdict is VIOLATION. With "false", the audit only reports.
+    default: "true"
+  args:
+    description: Extra arguments for `mcpgt run`, such as `--tool add_note --runs 5`.
+    default: ""
+  python-version:
+    description: Python version to run mcp-groundtruth with.
+    default: "3.12"
+  upload-report:
+    description: Upload the report directory as a workflow artifact.
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact; must be unique within the workflow run.
+    default: mcpgt-report
+
+outputs:
+  report:
+    description: Path to the report.json written by this audit.
+    value: ${{ steps.audit.outputs.report }}
+  violations:
+    description: Number of VIOLATION verdicts in the report.
+    value: ${{ steps.audit.outputs.violations }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - id: audit
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        FAIL_ON_VIOLATION: ${{ inputs.fail-on-violation }}
+        EXTRA_ARGS: ${{ inputs.args }}
+      run: |
+        # mcp-groundtruth is installed from this action's own checkout, so the
+        # version always matches the ref in `uses:`.
+        runs="${RUNNER_TEMP}/mcpgt-runs"
+        flags=(--audit --runs-dir "$runs")
+        if [ "$FAIL_ON_VIOLATION" = "true" ]; then flags+=(--fail-on-violation); fi
+        set +e
+        # EXTRA_ARGS is split into words on purpose.
+        # shellcheck disable=SC2086
+        uvx --from "$GITHUB_ACTION_PATH" mcpgt run "$TARGET" "${flags[@]}" $EXTRA_ARGS
+        status=$?
+        set -e
+        report="$(ls -1t "$runs"/*/report.json 2>/dev/null | head -n 1 || true)"
+        if [ -n "$report" ]; then
+          violations="$(python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); print(sum(v["outcome"] == "VIOLATION" for t in r["tools"] for v in t["verdicts"]))' "$report")"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+          echo "violations=$violations" >> "$GITHUB_OUTPUT"
+          echo "mcp-groundtruth: ${violations} VIOLATION verdict(s); report at ${report}" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit "$status"
+
+    - if: always() && inputs.upload-report == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/mcpgt-runs
+        if-no-files-found: ignore
