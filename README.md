@@ -29,6 +29,8 @@ what it does.
 - [Reports](#reports)
 - [Fixtures](#fixtures)
 - [Defining a fixture](#defining-a-fixture)
+- [Auditing third-party servers](#auditing-third-party-servers)
+- [Audit results](#audit-results)
 - [Design guarantees](#design-guarantees)
 - [Limitations](#limitations)
 - [Development](#development)
@@ -319,6 +321,23 @@ uv run mcpgt prepare memory          # fetch the pinned commit and build it
 uv run mcpgt verify-reset memory     # prove the seeded state resets exactly
 uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
 ```
+
+---
+
+## Audit results
+
+One server has been audited: the reference memory server
+(`@modelcontextprotocol/server-memory`) at `modelcontextprotocol/servers@bbb701e`,
+with one seeded graph, under Node 24 on macOS. The results say nothing about
+other servers or other versions of this one.
+
+- No violations of a declared hint.
+- Three over-declarations: `create_entities`, `create_relations` and
+  `add_observations` declare `idempotentHint: false`, but repeating a call
+  with identical arguments changed nothing in any of 12 argument sets tested.
+
+Reports, hand review and caveats:
+[results/memory-2026-10-14/REVIEW.md](results/memory-2026-10-14/REVIEW.md).
 
 ---
 
