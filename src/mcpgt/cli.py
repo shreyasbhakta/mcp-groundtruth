@@ -12,7 +12,7 @@ from pathlib import Path
 from mcpgt import fixture as fixtures
 from mcpgt import report as reports
 from mcpgt.runner import ResetStatus, run_fixture, verify_reset
-from mcpgt.verdict import MIN_RUNS, derive
+from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, derive
 
 EXIT_OK, EXIT_UNEXPECTED, EXIT_USAGE = 0, 1, 2
 
@@ -29,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("fixture")
     run.add_argument("--tool", help="only this tool")
     run.add_argument("--runs", type=int, default=MIN_RUNS, help=f"independent runs per test (min {MIN_RUNS})")
+    run.add_argument(
+        "--concurrent-attempts",
+        type=int,
+        default=CONCURRENT_ATTEMPTS,
+        help=f"concurrent attempts per mode (default {CONCURRENT_ATTEMPTS})",
+    )
     run.add_argument("--runs-dir", type=Path, default=reports.RUNS_DIR, help="where reports are written")
 
     rep = sub.add_parser("report", help="show a saved report")
@@ -77,7 +83,15 @@ def _verify_reset(fx: fixtures.Fixture, as_json: bool) -> int:
 def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="mcpgt-") as tmp:
-            run = asyncio.run(run_fixture(fx, Path(tmp), runs=args.runs, only_tool=args.tool))
+            run = asyncio.run(
+                run_fixture(
+                    fx,
+                    Path(tmp),
+                    runs=args.runs,
+                    only_tool=args.tool,
+                    concurrent_attempts=args.concurrent_attempts,
+                )
+            )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE

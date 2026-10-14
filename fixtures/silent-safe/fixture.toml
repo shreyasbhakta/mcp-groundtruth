@@ -30,3 +30,8 @@ behavior = "fails"
 [tools.expected.destructive]
 verdict = "INCONCLUSIVE:NO_DECLARATION"
 behavior = "holds"
+
+# Attempts are only run for falsifiable idempotence claims.
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+behavior = "unobserved"

@@ -29,3 +29,6 @@ behavior = "unstable"
 [tools.expected.read_only]
 verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
 secondary = ["NONDETERMINISTIC"]
+
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:NONDETERMINISTIC"

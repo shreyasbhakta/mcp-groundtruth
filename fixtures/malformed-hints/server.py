@@ -10,6 +10,13 @@ tools/list bytes by hand. Each tool is malformed in a different way:
 
 The listing is split over two pages to exercise nextCursor. (An SDK client
 would see no tools at all from this server: `listy` fails its validation.)
+
+It also hosts `scribble`, well-formed readOnlyHint:true, which writes a row
+and then answers with a JSON-RPC error rather than a result. The SDK server
+turns every tool exception into isError, so only a hand-written server can
+produce a protocol error after a write.
+
+Requests are handled strictly one at a time.
 """
 
 import contextlib
@@ -33,8 +40,9 @@ PAGES = {
     "page-2": (
         '{"tools":['
         '{"name":"dup_peek","inputSchema":%s,"annotations":{"readOnlyHint":true,"readOnlyHint":true}},'
-        '{"name":"listy","inputSchema":%s,"annotations":["readOnly"]}'
-        "]}" % (SCHEMA, SCHEMA)
+        '{"name":"listy","inputSchema":%s,"annotations":["readOnly"]},'
+        '{"name":"scribble","inputSchema":%s,"annotations":{"readOnlyHint":true}}'
+        "]}" % (SCHEMA, SCHEMA, SCHEMA)
     ),
 }
 
@@ -82,8 +90,12 @@ def handle(msg: dict) -> str | None:
         return error(mid, -32602, "bad cursor") if page is None else result(mid, page)
     if method == "tools/call":
         name = params.get("name")
-        if name not in ("bump", "peek", "dup_peek", "listy"):
+        if name not in ("bump", "peek", "dup_peek", "listy", "scribble"):
             return error(mid, -32602, f"unknown tool {name!r}")
+        if name == "scribble":
+            with contextlib.closing(sqlite3.connect(DB)) as conn, conn:
+                conn.execute("INSERT INTO notes (key) VALUES (?)", (params.get("arguments", {}).get("key", ""),))
+            return error(mid, -32603, "internal error after write")
         text = call(name, params.get("arguments", {}).get("key", ""))
         return result(mid, json.dumps({"content": [{"type": "text", "text": text}], "isError": False}))
     return error(mid, -32601, f"method not found: {method}")

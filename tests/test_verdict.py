@@ -9,7 +9,10 @@ from mcpgt.fixture import FixtureCoverage
 from mcpgt.snapshot import Coverage, RegionDelta, SnapshotDelta, StateCategory
 from mcpgt.verdict import (
     HINT_FOR,
+    Attempt,
     Behavior,
+    ConcurrencyMode,
+    Overlap,
     Incoherence,
     InconclusiveReason as IR,
     Instability,
@@ -28,11 +31,12 @@ ROW = (("text", "x"),)
 FULL = FixtureCoverage(adapters=(Coverage("sqlite:s", ("all",), ()),), unobserved=())
 PARTIAL = FixtureCoverage(adapters=(Coverage("sqlite:s", ("all",), ()),), unobserved=("memory:process",))
 SEQ, RO, DE = TestKind.SEQUENTIAL_IDEMPOTENCE, TestKind.READ_ONLY, TestKind.DESTRUCTIVE
+CO = TestKind.CONCURRENT_IDEMPOTENCE
 
 # Falsifiable claims for each test, without readOnlyHint:true superseding the others.
 WRITER = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}
 READER = {"readOnlyHint": True}
-CLAIM_FOR = {SEQ: WRITER, DE: WRITER, RO: READER}
+CLAIM_FOR = {SEQ: WRITER, CO: WRITER, DE: WRITER, RO: READER}
 UNSTABLE = Instability(("t/once-1", "t/once-2"), ("sqlite:s/items.value",), 1, 1)
 
 
@@ -68,8 +72,17 @@ def evidence(
     setup_error=None,
     contract_instability=(),
     errored_with_side_effects=False,
+    attempts=None,
+    concurrent_note=None,
 ):
     return SimpleNamespace(
+        errors=(),
+        concurrent=tuple(attempts or ()),
+        concurrent_ran=attempts is not None,
+        concurrent_note=concurrent_note,
+        concurrent_setup_error=None,
+        concurrent_call_error=None,
+        concurrent_errors=(),
         tool="t",
         contract=contract(**hints),
         contract_error=None,
@@ -296,15 +309,20 @@ def test_partial_coverage_blocks_pass_but_not_violation():
 
 
 def test_every_verdict_carries_its_evidence():
-    for v in derive(fixture_run(evidence(WRITER))):
+    for v in derive(fixture_run(evidence(WRITER, attempts=held(2)))):
         data = v.to_json()
         assert data["contract"]["hints"]["idempotentHint"] == "true"
         observed = data["observed"]
-        assert observed["runs"] and "deltas" in observed["runs"][0]
-        assert set(observed["runs"][0]["changed"]) == {"business", "append_only", "unclassified"}
+        if v.test is CO:
+            first = data["concurrency"]["attempts"][0]
+            assert {"mode", "overlap", "wire_overlap_ms", "rtt_ms", "deltas", "diverged"} <= first.keys()
+        else:
+            assert observed["runs"] and "deltas" in observed["runs"][0]
+            assert set(observed["runs"][0]["changed"]) == {"business", "append_only", "unclassified"}
+        assert "call_errors" in observed
         assert {"affected_categories", "errored_with_side_effects", "nondeterminism"} <= observed.keys()
         assert data["coverage"]["complete"] is True
-        assert data["run_count"] == 3
+        assert data["run_count"] == (2 if v.test is CO else 3)  # concurrent: completed attempts
         assert "secondary_reasons" in data
 
 
@@ -328,3 +346,69 @@ def test_coherence(hints, issues):
 def test_hint_mapping_covers_every_test():
     assert set(HINT_FOR) == set(TestKind)
     assert HINT_FOR[RO] is Annotation.READ_ONLY
+
+
+# --- Concurrent idempotence: one-sided ---------------------------------------
+
+ONE, TWO = ConcurrencyMode.SINGLE_CONNECTION, ConcurrencyMode.TWO_PROCESS
+
+
+def attempt(mode, overlap, *, added=()):
+    return Attempt(f"t/{mode.value}", mode, overlap, 5.0, (0.2,), obs("once", added=added))
+
+
+def held(n, mode=TWO, overlap=Overlap.VERIFIED):
+    return [attempt(mode, overlap) for _ in range(n)]
+
+
+def test_a_single_diverging_attempt_is_a_conclusive_violation():
+    attempts = held(19) + [attempt(ONE, Overlap.UNVERIFIED, added=[B])]
+    v = verdict_for(CO, claim(CO, attempts=attempts))
+    assert outcome(v) == (Outcome.VIOLATION, None)
+    assert v.produced_by == (ONE,)
+    conc = v.to_json()["concurrency"]
+    assert conc["modes"]["single_connection"]["diverged"] == 1
+    assert conc["produced_by"] == ["single_connection"]
+    assert v.runs == 20
+
+
+def test_pass_needs_verified_overlap_and_names_the_mode():
+    v = verdict_for(CO, claim(CO, attempts=held(20, ONE, Overlap.UNVERIFIED) + held(1)))
+    assert outcome(v) == (Outcome.PASS, None)
+    assert v.produced_by == (TWO,)
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    [held(20, ONE, Overlap.UNVERIFIED), held(20, TWO, Overlap.UNVERIFIED), held(20, TWO, Overlap.NONE), []],
+)
+def test_no_verified_overlap_is_never_pass(attempts):
+    v = verdict_for(CO, claim(CO, attempts=attempts))
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.NO_OVERLAP_OBSERVED)
+
+
+def test_unstable_single_call_baseline_blocks_even_a_divergence():
+    ev = claim(CO, attempts=[attempt(TWO, Overlap.VERIFIED, added=[B])], once_instability=(UNSTABLE,))
+    assert verdict_for(CO, ev).reason is IR.NONDETERMINISTIC
+
+
+def test_concurrent_unclassified_divergence():
+    v = verdict_for(CO, claim(CO, attempts=held(5) + [attempt(TWO, Overlap.VERIFIED, added=[U])]))
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.UNCLASSIFIED_STATE)
+
+
+def test_concurrent_with_partial_coverage():
+    verified = verdict_for(CO, claim(CO, attempts=held(3)), coverage=PARTIAL)
+    assert outcome(verified) == (Outcome.INCONCLUSIVE, IR.PARTIAL_COVERAGE)
+    assert verified.secondary_reasons == ()
+    unverified = verdict_for(CO, claim(CO, attempts=held(3, ONE, Overlap.UNVERIFIED)), coverage=PARTIAL)
+    assert outcome(unverified) == (Outcome.INCONCLUSIVE, IR.NO_OVERLAP_OBSERVED)
+    assert unverified.secondary_reasons == (IR.PARTIAL_COVERAGE,)
+    diverged = verdict_for(CO, claim(CO, attempts=[attempt(ONE, Overlap.UNVERIFIED, added=[B])]), coverage=PARTIAL)
+    assert outcome(diverged) == (Outcome.VIOLATION, None)
+
+
+def test_attempts_not_run_add_no_overlap_noise():
+    v = verdict_for(CO, evidence({"readOnlyHint": True}, concurrent_note="attempts not run"))
+    assert outcome(v) == (Outcome.NOT_APPLICABLE, NA.SUPERSEDED_BY_READ_ONLY)
+    assert IR.NO_OVERLAP_OBSERVED not in v.secondary_reasons

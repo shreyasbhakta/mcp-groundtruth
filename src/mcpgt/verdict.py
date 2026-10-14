@@ -12,12 +12,16 @@ the read-only claim is the stronger one and is tested instead.
 Every verdict has one primary reason and may have secondary reasons: every
 other problem found, so that e.g. a CALL_ERROR stays visible under
 NO_DECLARATION.
+
+The concurrent-idempotence test is one-sided: a single attempt whose final
+state differs from the single-call state is a conclusive VIOLATION, while
+PASS only means no race was observed in attempts whose overlap was verified.
 """
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
@@ -29,6 +33,7 @@ if TYPE_CHECKING:
     from mcpgt.runner import FixtureRun, ToolEvidence
 
 MIN_RUNS = 3
+CONCURRENT_ATTEMPTS = 20  # per mode
 
 
 class Outcome(enum.Enum):
@@ -61,6 +66,8 @@ class InconclusiveReason(enum.Enum):
     NONDETERMINISTIC = "NONDETERMINISTIC"
     CALL_ERROR = "CALL_ERROR"
     SETUP_FAILED = "SETUP_FAILED"
+    # Concurrent test only: no race seen, but no attempt was verified to overlap.
+    NO_OVERLAP_OBSERVED = "NO_OVERLAP_OBSERVED"
 
 
 class NotApplicableReason(enum.Enum):
@@ -96,6 +103,22 @@ class Behavior(enum.Enum):
     UNOBSERVED = "unobserved"  # sessions failed; nothing to judge
 
 
+class ErrorKind(enum.Enum):
+    TOOL_ERROR = "tool_error"  # result with isError: true
+    PROTOCOL_ERROR = "protocol_error"  # JSON-RPC error response
+
+
+class ConcurrencyMode(enum.Enum):
+    SINGLE_CONNECTION = "single_connection"  # two concurrent requests on one connection
+    TWO_PROCESS = "two_process"  # two server instances, same backing store, one call each
+
+
+class Overlap(enum.Enum):
+    VERIFIED = "verified"  # calls provably executing at the same time
+    UNVERIFIED = "unverified"  # in flight together, but the server may have serialized them
+    NONE = "none"  # not even in flight together
+
+
 HINT_FOR = {
     TestKind.SEQUENTIAL_IDEMPOTENCE: Annotation.IDEMPOTENT,
     TestKind.CONCURRENT_IDEMPOTENCE: Annotation.IDEMPOTENT,
@@ -115,7 +138,12 @@ PROPERTY = {
 }
 # Tests compared against the control session rather than against each other.
 CONTROL_BASED = frozenset({TestKind.READ_ONLY, TestKind.DESTRUCTIVE})
-IMPLEMENTED = (TestKind.SEQUENTIAL_IDEMPOTENCE, TestKind.READ_ONLY, TestKind.DESTRUCTIVE)
+IMPLEMENTED = (
+    TestKind.SEQUENTIAL_IDEMPOTENCE,
+    TestKind.CONCURRENT_IDEMPOTENCE,
+    TestKind.READ_ONLY,
+    TestKind.DESTRUCTIVE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +186,47 @@ class Instability:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ErrorRecord:
+    """A call that completed with an error (not a dead connection)."""
+
+    session: str
+    position: int  # 1-based call position within the session
+    kind: ErrorKind
+    state_changed: bool  # session end state differs from the control state
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "session": self.session,
+            "position": self.position,
+            "kind": self.kind.value,
+            "state_changed": self.state_changed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Attempt:
+    """One concurrent attempt, compared against the single-call state."""
+
+    label: str
+    mode: ConcurrencyMode
+    overlap: Overlap
+    wire_overlap_ms: float | None  # how long both calls were in flight together
+    rtt_ms: tuple[float, ...]  # ping round trip per connection, just before the calls
+    observation: Observation
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "mode": self.mode.value,
+            "overlap": self.overlap.value,
+            "wire_overlap_ms": self.wire_overlap_ms,
+            "rtt_ms": list(self.rtt_ms),
+            "diverged": behavior_in(TestKind.CONCURRENT_IDEMPOTENCE, self.observation) is Behavior.FAILS,
+            **self.observation.to_json(),
+        }
+
+
 def instability_between(labels: tuple[str, str], deltas: Sequence[SnapshotDelta]) -> Instability | None:
     columns, added, removed = [], 0, 0
     for delta in deltas:
@@ -197,6 +266,15 @@ def combined_behavior(test: TestKind, observations: Sequence[Observation], stabl
     if not observations:
         return Behavior.UNOBSERVED
     per_run = {behavior_in(test, o) for o in observations}
+    if test is TestKind.CONCURRENT_IDEMPOTENCE:
+        # Races are intermittent: one diverging attempt is enough, and
+        # attempts disagreeing is expected rather than unstable.
+        if not stable:
+            return Behavior.UNSTABLE
+        for b in (Behavior.FAILS, Behavior.UNCLASSIFIED_ONLY):
+            if b in per_run:
+                return b
+        return Behavior.HOLDS
     if not stable or len(per_run) > 1:
         return Behavior.UNSTABLE
     return per_run.pop()
@@ -223,8 +301,22 @@ class Verdict:
     observations: tuple[Observation, ...]
     instability: tuple[Instability, ...]
     errored_with_side_effects: bool
+    errors: tuple[ErrorRecord, ...]
     coverage: FixtureCoverage
     runs: int
+    attempts: tuple[Attempt, ...] = ()  # concurrent test only
+    concurrency_note: str | None = None  # why attempts were not run, or a mode was excluded
+
+    @property
+    def produced_by(self) -> tuple[ConcurrencyMode, ...]:
+        """Concurrent test: the modes whose attempts decided the verdict."""
+        if self.outcome is Outcome.VIOLATION:
+            hit = {a.mode for a in self.attempts if behavior_in(self.test, a.observation) is Behavior.FAILS}
+        elif self.outcome is Outcome.PASS:
+            hit = {a.mode for a in self.attempts if a.overlap is Overlap.VERIFIED}
+        else:
+            hit = set()
+        return tuple(m for m in ConcurrencyMode if m in hit)
 
     @property
     def reason(self) -> Reason | None:
@@ -270,11 +362,32 @@ class Verdict:
                 # business and append-only destruction are reported separately.
                 "affected_categories": [c.value for c in self.affected_categories],
                 "errored_with_side_effects": self.errored_with_side_effects,
+                "call_errors": [e.to_json() for e in self.errors],
                 "nondeterminism": [i.to_json() for i in self.instability],
-                "runs": [o.to_json() for o in self.observations],
+                "runs": [o.to_json() for o in self.observations] if not self.attempts else [],
             },
             "coverage": self.coverage.to_json(),
             "run_count": self.runs,
+            **({"concurrency": self._concurrency_json()} if self.test is TestKind.CONCURRENT_IDEMPOTENCE else {}),
+        }
+
+    def _concurrency_json(self) -> dict[str, Any]:
+        modes: dict[str, Any] = {}
+        for mode in ConcurrencyMode:
+            mine = [a for a in self.attempts if a.mode is mode]
+            modes[mode.value] = {
+                "attempts": len(mine),
+                "overlap": {o.value: sum(a.overlap is o for a in mine) for o in Overlap},
+                "diverged": sum(
+                    behavior_in(self.test, a.observation) is Behavior.FAILS for a in mine
+                ),
+            }
+        return {
+            "one_sided": "VIOLATION is conclusive; PASS means no race observed in verified-overlap attempts",
+            "produced_by": [m.value for m in self.produced_by],
+            "note": self.concurrency_note,
+            "modes": modes,
+            "attempts": [a.to_json() for a in self.attempts],
         }
 
 
@@ -285,12 +398,20 @@ def derive(run: FixtureRun) -> list[Verdict]:
 def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
     hint = HINT_FOR[test]
     control = test in CONTROL_BASED
-    observations = tuple(ev.effect if control else ev.idempotence)
-    instability = tuple(ev.once_instability) + tuple(
-        run.control_instability if control else ev.twice_instability
-    )
+    concurrent = test is TestKind.CONCURRENT_IDEMPOTENCE
+    attempts: tuple[Attempt, ...] = tuple(ev.concurrent) if concurrent else ()
+    if concurrent:
+        observations = tuple(a.observation for a in attempts)
+        instability = tuple(ev.once_instability)  # the single-call baseline must be stable
+        errors = tuple(ev.concurrent_errors)
+    else:
+        observations = tuple(ev.effect if control else ev.idempotence)
+        instability = tuple(ev.once_instability) + tuple(
+            run.control_instability if control else ev.twice_instability
+        )
+        errors = tuple(ev.errors)
     behavior = combined_behavior(test, observations, stable=not instability)
-    issues = _issues(run, ev, control, observations, instability, behavior)
+    issues = _issues(run, ev, test, observations, instability, behavior, attempts)
     contract = ev.contract
 
     def verdict(outcome: Outcome, primary: Issue | None = None, rest: Sequence[Issue] = ()) -> Verdict:
@@ -304,9 +425,12 @@ def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
             behavior=behavior,
             observations=observations,
             instability=instability,
-            errored_with_side_effects=ev.errored_with_side_effects,
+            errored_with_side_effects=ev.errored_with_side_effects and not concurrent,
+            errors=errors,
             coverage=run.coverage,
-            runs=run.runs,
+            runs=len(attempts) if concurrent else run.runs,
+            attempts=attempts,
+            concurrency_note=ev.concurrent_note if concurrent else None,
         )
 
     inconclusive, not_applicable = Outcome.INCONCLUSIVE, Outcome.NOT_APPLICABLE
@@ -345,12 +469,15 @@ def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
 def _issues(
     run: FixtureRun,
     ev: ToolEvidence,
-    control: bool,
+    test: TestKind,
     observations: Sequence[Observation],
     instability: Sequence[Instability],
     behavior: Behavior,
+    attempts: Sequence[Attempt],
 ) -> list[Issue]:
     """Every problem with this (tool, test), in precedence order."""
+    control = test in CONTROL_BASED
+    concurrent = test is TestKind.CONCURRENT_IDEMPOTENCE
     issues: list[Issue] = []
     if run.reset.status is ResetStatus.SETUP_FAILED:
         issues.append(Issue(InconclusiveReason.SETUP_FAILED, run.reset.detail))
@@ -358,10 +485,12 @@ def _issues(
         issues.append(Issue(InconclusiveReason.RESET_UNVERIFIED, run.reset.detail))
     if control and run.control_error is not None:
         issues.append(Issue(InconclusiveReason.SETUP_FAILED, f"control session: {run.control_error}"))
-    if ev.setup_error is not None:
-        issues.append(Issue(InconclusiveReason.SETUP_FAILED, ev.setup_error))
-    if ev.call_error is not None:
-        issues.append(Issue(InconclusiveReason.CALL_ERROR, ev.call_error))
+    setup_error = ev.concurrent_setup_error if concurrent else ev.setup_error
+    if setup_error is not None:
+        issues.append(Issue(InconclusiveReason.SETUP_FAILED, setup_error))
+    call_error = ev.concurrent_call_error if concurrent else ev.call_error
+    if call_error is not None:
+        issues.append(Issue(InconclusiveReason.CALL_ERROR, call_error))
     if ev.contract_instability:
         issues.append(
             Issue(
@@ -379,10 +508,15 @@ def _issues(
         )
     if behavior is Behavior.UNSTABLE and not instability:
         issues.append(Issue(InconclusiveReason.NONDETERMINISTIC, "runs disagree"))
-    if not issues and len(observations) < MIN_RUNS:
+    if not concurrent and not issues and len(observations) < MIN_RUNS:
         issues.append(Issue(InconclusiveReason.NONDETERMINISTIC, f"fewer than {MIN_RUNS} complete runs"))
     if behavior is Behavior.UNCLASSIFIED_ONLY:
         issues.append(Issue(InconclusiveReason.UNCLASSIFIED_STATE))
+    if concurrent and ev.concurrent_ran and behavior in (Behavior.HOLDS, Behavior.UNOBSERVED):
+        verified = sum(a.overlap is Overlap.VERIFIED for a in attempts)
+        if not verified:
+            detail = ev.concurrent_note or f"0 of {len(attempts)} attempts had verified overlap"
+            issues.append(Issue(InconclusiveReason.NO_OVERLAP_OBSERVED, detail))
     if not run.coverage.complete:
         issues.append(Issue(InconclusiveReason.PARTIAL_COVERAGE, ", ".join(run.coverage.unobserved) or None))
     return issues

@@ -32,6 +32,11 @@ behavior = "holds"
 verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
 secondary = ["PARTIAL_COVERAGE"]
 
+# Overlap is verified and nothing observed diverges, but the journal is unseen.
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:PARTIAL_COVERAGE"
+secondary = []
+
 [[tools]]
 name = "peek"
 arguments = { event = "e1" }
@@ -45,4 +50,7 @@ behavior = "holds"
 verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
 
 [tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
 verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

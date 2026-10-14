@@ -31,12 +31,23 @@ def test_expected_verdicts(first):
     by_test = {v.test: v.outcome for v in verdicts}
     assert by_test == {
         TestKind.SEQUENTIAL_IDEMPOTENCE: Outcome.PASS,
+        TestKind.CONCURRENT_IDEMPOTENCE: Outcome.PASS,
         TestKind.READ_ONLY: Outcome.NOT_APPLICABLE,
         TestKind.DESTRUCTIVE: Outcome.NOT_APPLICABLE,
     }
-    assert report["expectations"]["checked"] == 3
+    assert report["expectations"]["checked"] == 4
     assert report["expectations"]["mismatches"] == []
-    assert report["expectations"]["not_run"] == ["upsert_item/concurrent_idempotence"]
+    assert report["expectations"]["not_run"] == []
+
+
+def test_concurrent_verdict_reports_attempts_and_mode(first):
+    _, verdicts, _ = first
+    (v,) = [v for v in verdicts if v.test is TestKind.CONCURRENT_IDEMPOTENCE]
+    conc = v.to_json()["concurrency"]
+    assert conc["produced_by"] == ["two_process"]
+    assert conc["modes"]["two_process"]["attempts"] == 20
+    assert conc["modes"]["single_connection"]["overlap"]["verified"] == 0  # never provable on one connection
+    assert len(conc["attempts"]) == 40
 
 
 def test_control_sessions_are_stable_and_inert(first):
@@ -72,17 +83,26 @@ def test_report_is_json_serializable(first):
     assert json.loads(json.dumps(report)) == report
 
 
+def _stable(v):
+    """Verdict JSON minus attempt timings, which are measurements, not results."""
+    data = v.to_json()
+    for a in data.get("concurrency", {}).get("attempts", []):
+        a.pop("wire_overlap_ms"), a.pop("rtt_ms"), a.pop("overlap")
+    data.get("concurrency", {}).pop("modes", None)
+    return data
+
+
 def test_same_fixture_same_verdicts(first, tmp_path):
     _, verdicts_a, _ = first
     _, verdicts_b, _ = full_run(tmp_path)
-    assert [v.to_json() for v in verdicts_a] == [v.to_json() for v in verdicts_b]
+    assert [_stable(v) for v in verdicts_a] == [_stable(v) for v in verdicts_b]
 
 
 def test_cli_run_and_report(tmp_path, capsys):
     runs_dir = tmp_path / "runs"
-    assert main(["run", str(FX.root), "--runs-dir", str(runs_dir)]) == 0
+    assert main(["run", str(FX.root), "--runs-dir", str(runs_dir), "--concurrent-attempts", "3"]) == 0
     out = capsys.readouterr().out
-    assert "3/3 matched" in out
+    assert "4/4 matched" in out
     (run_dir,) = runs_dir.iterdir()
     assert main(["report", run_dir.name, "--runs-dir", str(runs_dir)]) == 0
     assert "sequential_idempotence" in capsys.readouterr().out

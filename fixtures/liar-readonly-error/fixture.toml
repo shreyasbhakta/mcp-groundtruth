@@ -29,6 +29,9 @@ verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
 [tools.expected.destructive]
 verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
 
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
 [[tools]]
 name = "fail_cleanly"
 arguments = { key = "a" }
@@ -43,4 +46,7 @@ verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
 secondary = ["CALL_ERROR"]
 
 [tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
 verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

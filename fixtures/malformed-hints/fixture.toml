@@ -11,6 +11,7 @@ kind = "sqlite"
 label = "state.db"
 seed = "seed.sql"
 business = ["items"]
+append_only = ["notes"]
 
 # bump: idempotentHint "true", destructiveHint 1, readOnlyHint false.
 [[tools]]
@@ -30,6 +31,10 @@ behavior = "fails"  # overwrites the seeded value
 verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
 
 # peek: readOnlyHint null does not supersede; its well-formed idempotentHint is tested.
+
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+
 [[tools]]
 name = "peek"
 arguments = { key = "a" }
@@ -46,6 +51,12 @@ secondary = []
 verdict = "INCONCLUSIVE:NO_DECLARATION"
 
 # dup_peek: readOnlyHint appears twice (both true): malformed, not superseding.
+
+# Two independent instances verify overlap even though each serializes.
+[tools.expected.concurrent_idempotence]
+verdict = "PASS"
+secondary = []
+
 [[tools]]
 name = "dup_peek"
 arguments = { key = "a" }
@@ -61,6 +72,10 @@ verdict = "INCONCLUSIVE:NO_DECLARATION"
 verdict = "INCONCLUSIVE:NO_DECLARATION"
 
 # listy: annotations is a list, so every hint is malformed.
+
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:NO_DECLARATION"
+
 [[tools]]
 name = "listy"
 arguments = { key = "a" }
@@ -73,3 +88,26 @@ verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
 
 [tools.expected.destructive]
 verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+
+# scribble: well-formed readOnlyHint:true; writes, then a JSON-RPC error.
+
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:MALFORMED_DECLARATION"
+
+[[tools]]
+name = "scribble"
+arguments = { key = "a" }
+
+[tools.expected.read_only]
+verdict = "VIOLATION"
+secondary = []
+errored_with_side_effects = true
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

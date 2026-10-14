@@ -30,3 +30,6 @@ verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
 
 [tools.expected.destructive]
 verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"

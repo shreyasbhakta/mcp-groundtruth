@@ -11,8 +11,11 @@ Evidence only; verdict.py interprets it.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import os
+import time
 import shutil
 import sqlite3
 from collections.abc import Sequence
@@ -20,11 +23,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, ToolListing, parse_listing
+from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
 from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec
 from mcpgt.normalize import NormalizationError
-from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, diff
-from mcpgt.verdict import MIN_RUNS, Instability, Observation, ResetStatus, instability_between
+from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, StateCategory, diff
+from mcpgt.verdict import (
+    CONCURRENT_ATTEMPTS,
+    FALSIFIABLE,
+    MIN_RUNS,
+    Attempt,
+    ConcurrencyMode,
+    ErrorKind,
+    ErrorRecord,
+    Instability,
+    Observation,
+    Overlap,
+    ResetStatus,
+    instability_between,
+)
 from mcpgt.wire import RawResponse, WireClient, WireError
 
 State = dict[str, Snapshot]  # surface -> snapshot
@@ -154,22 +170,17 @@ class Session:
 
     @property
     def transport_error(self) -> str | None:
-        """The connection died, or a call got a JSON-RPC error instead of a result."""
-        if self.wire_error is not None:
-            return self.wire_error
-        for response in self.responses:
-            if response.is_error:
-                return f"JSON-RPC error: {response.text[:500]}"
-        return None
+        """The connection died mid-session."""
+        return self.wire_error
 
     @property
-    def tool_errored(self) -> bool:
-        """Some call completed with ``isError: true``."""
-        return any(r.result is not None and r.result.get("isError") is True for r in self.responses)
+    def call_errors(self) -> tuple[tuple[int, ErrorKind], ...]:
+        """(1-based call position, kind) for every call that completed with an error."""
+        return _call_errors(self.responses)
 
     @property
     def ok(self) -> bool:
-        """Completed and observed. Tool-level errors are judged separately."""
+        """Completed and observed. Calls that returned errors are judged separately."""
         return self.setup_error is None and self.transport_error is None and self.after is not None
 
     def to_json(self) -> dict[str, Any]:
@@ -178,7 +189,7 @@ class Session:
             "calls": list(self.calls),
             "setup_error": self.setup_error,
             "transport_error": self.transport_error,
-            "tool_errored": self.tool_errored,
+            "call_errors": [{"position": p, "kind": k.value} for p, k in self.call_errors],
             "responses": [r.text for r in self.responses],
             "stderr_tail": self.stderr[-2000:],
         }
@@ -251,8 +262,16 @@ class ToolEvidence:
     effect: tuple[Observation, ...]  # per run: control vs once
     once_instability: tuple[Instability, ...]  # once-states that differ from once-1
     twice_instability: tuple[Instability, ...]
-    call_error: str | None  # transport error, or isError with no state change
-    errored_with_side_effects: bool  # isError, yet state changed; judged on state
+    call_error: str | None  # dead connection, or an error response with no state change
+    errored_with_side_effects: bool  # single-call session errored, yet state changed
+    errors: tuple[ErrorRecord, ...]  # every errored call in once/twice sessions
+    concurrent: tuple[Attempt, ...] = ()
+    concurrent_ran: bool = False
+    concurrent_note: str | None = None  # why attempts were not run, or a mode was excluded
+    concurrent_setup_error: str | None = None
+    concurrent_call_error: str | None = None
+    concurrent_errors: tuple[ErrorRecord, ...] = ()
+    concurrent_raw: tuple[ConcurrentRun, ...] = ()
 
     @property
     def setup_error(self) -> str | None:
@@ -297,7 +316,11 @@ class FixtureRun:
 
 
 async def run_fixture(
-    fixture: Fixture, work_dir: Path, runs: int = MIN_RUNS, only_tool: str | None = None
+    fixture: Fixture,
+    work_dir: Path,
+    runs: int = MIN_RUNS,
+    only_tool: str | None = None,
+    concurrent_attempts: int = CONCURRENT_ATTEMPTS,
 ) -> FixtureRun:
     if runs < MIN_RUNS:
         raise ValueError(f"at least {MIN_RUNS} runs are required (got {runs})")
@@ -338,7 +361,7 @@ async def run_fixture(
     for spec in specs:
         once, twice = per_tool[spec.name]
         contract, contract_error, contract_instability = _contract_for(spec.name, contract_sets, listing_errors)
-        call_error, side_effects = _tool_errors(fixture, once + twice, baseline)
+        call_error, side_effects, errors = _error_evidence(fixture, once, twice, baseline)
         idempotence = tuple(
             Observation("once", deltas(fixture, o.after, t.after))
             for o, t in zip(once, twice)
@@ -363,8 +386,26 @@ async def run_fixture(
                 twice_instability=_instability(fixture, [t for t in twice if t.ok]),
                 call_error=call_error,
                 errored_with_side_effects=side_effects,
+                errors=errors,
             )
         )
+
+    # Concurrent attempts, only where there is a falsifiable idempotence claim
+    # to test, so the 2 x N extra sessions are spent where they can decide.
+    lifecycle_inert = all(
+        not (o.changed(StateCategory.BUSINESS) or o.changed(StateCategory.UNCLASSIFIED)) for o in control_effect
+    )
+    for i, (spec, ev) in enumerate(zip(specs, evidence)):
+        once_ok = [o for o in per_tool[spec.name][0] if o.ok]
+        reason = _concurrent_skip_reason(ev, once_ok)
+        if reason is not None:
+            evidence[i] = dataclasses.replace(ev, concurrent_note=reason)
+            continue
+        attempts_raw: list[ConcurrentRun] = []
+        for mode in ConcurrencyMode:
+            for n in range(1, concurrent_attempts + 1):
+                attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, f"{spec.name}/{mode.value}-{n}"))
+        evidence[i] = _with_concurrent(fixture, ev, attempts_raw, once_ok[0].after, baseline, lifecycle_inert)
 
     listed = {name for contracts in contract_sets for name in contracts}
     return FixtureRun(
@@ -396,28 +437,230 @@ def _instability(fixture: Fixture, sessions: Sequence[Session]) -> tuple[Instabi
     return tuple(found)
 
 
-def _tool_errors(
-    fixture: Fixture, sessions: Sequence[Session], baseline: State | None
-) -> tuple[str | None, bool]:
-    """(call error, errored with side effects).
+def _call_errors(responses: Sequence[RawResponse]) -> tuple[tuple[int, ErrorKind], ...]:
+    out = []
+    for position, response in enumerate(responses, start=1):
+        if response.is_error:
+            out.append((position, ErrorKind.PROTOCOL_ERROR))
+        elif response.result is not None and response.result.get("isError") is True:
+            out.append((position, ErrorKind.TOOL_ERROR))
+    return tuple(out)
 
-    A call that returned ``isError: true`` is a CALL_ERROR only if it left no
-    trace. If state changed anyway, the session is judged on its state like
-    any other, and the evidence says it errored with side effects. Transport
-    errors are always CALL_ERROR: state after a dead connection is not a
-    completed call's state.
+
+def _state_changed(fixture: Fixture, reference: State | None, after: State | None) -> bool:
+    if reference is None or after is None:
+        return False
+    return any(d.regions for d in deltas(fixture, reference, after))
+
+
+def _error_evidence(
+    fixture: Fixture, once: Sequence[Session], twice: Sequence[Session], baseline: State | None
+) -> tuple[str | None, bool, tuple[ErrorRecord, ...]]:
+    """(call error, errored with side effects, error records).
+
+    A call that completed with an error (``isError: true`` or a JSON-RPC
+    error) is a CALL_ERROR only if its session left no trace against the
+    control state. Otherwise the session is judged on its state like any
+    other. ``errored_with_side_effects`` is raised only from single-call
+    sessions, where the change can be attributed to the erroring call; in
+    twice sessions the erroring call positions are recorded without raising
+    it. A dead connection is always a CALL_ERROR.
     """
+    call_error: str | None = None
     side_effects = False
-    for session in sessions:
+    records: list[ErrorRecord] = []
+    for session in list(once) + list(twice):
         if session.transport_error is not None:
-            return session.transport_error, side_effects
-        if session.tool_errored and session.ok:
-            reference = baseline if baseline is not None else session.before
-            if any(d.regions for d in deltas(fixture, reference, session.after)):
-                side_effects = True
-            else:
-                return f"{session.label}: tool returned isError with no state change", side_effects
-    return None, side_effects
+            call_error = call_error or f"{session.label}: {session.transport_error}"
+            continue
+        if not session.call_errors or not session.ok:
+            continue
+        reference = baseline if baseline is not None else session.before
+        changed = _state_changed(fixture, reference, session.after)
+        for position, kind in session.call_errors:
+            records.append(ErrorRecord(session.label, position, kind, changed))
+        if not changed:
+            kinds = ", ".join(sorted({k.value for _, k in session.call_errors}))
+            call_error = call_error or f"{session.label}: {kinds} with no state change"
+        elif len(session.calls) == 1:
+            side_effects = True
+    return call_error, side_effects, tuple(records)
+
+
+# --- Concurrent attempts ----------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ConcurrentRun:
+    label: str
+    mode: ConcurrencyMode
+    setup_error: str | None = None
+    wire_error: str | None = None
+    responses: tuple[RawResponse, ...] = ()
+    windows: tuple[tuple[float, float], ...] = ()  # (sent, received) per call, monotonic seconds
+    rtts: tuple[float, ...] = ()  # worst ping round trip per connection, seconds
+    before: State | None = None
+    after: State | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.setup_error is None and self.wire_error is None and self.after is not None
+
+    @property
+    def wire_overlap(self) -> float | None:
+        if len(self.windows) != 2:
+            return None
+        return min(r for _, r in self.windows) - max(s for s, _ in self.windows)
+
+    @property
+    def overlap(self) -> Overlap:
+        """Two independent instances: execution overlap is proven when both calls
+        were in flight together for longer than both transport round trips
+        combined. One connection: never provable, the server may serialize."""
+        wire = self.wire_overlap
+        if wire is None or wire <= 0:
+            return Overlap.NONE
+        if self.mode is ConcurrencyMode.TWO_PROCESS and len(self.rtts) == 2 and wire > sum(self.rtts):
+            return Overlap.VERIFIED
+        return Overlap.UNVERIFIED
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "mode": self.mode.value,
+            "setup_error": self.setup_error,
+            "transport_error": self.wire_error,
+            "responses": [r.text for r in self.responses],
+        }
+
+
+async def _ping_rtt(client: WireClient, pings: int = 3) -> float:
+    worst = 0.0
+    for _ in range(pings):
+        start = time.monotonic()
+        await client.request("ping")
+        worst = max(worst, time.monotonic() - start)
+    return worst
+
+
+async def _timed_call(client: WireClient, spec: ToolSpec) -> tuple[RawResponse, tuple[float, float]]:
+    sent = time.monotonic()
+    response = await client.call_tool(spec.name, spec.arguments)
+    return response, (sent, time.monotonic())
+
+
+async def run_concurrent(
+    fixture: Fixture, state_dir: Path, spec: ToolSpec, mode: ConcurrencyMode, label: str
+) -> ConcurrentRun:
+    """reset -> start (one or two instances) -> list -> ping -> two calls at once -> stop -> observe."""
+    try:
+        reset(fixture, state_dir)
+        before = observe(fixture, state_dir)
+    except SetupError as exc:
+        return ConcurrentRun(label, mode, setup_error=str(exc))
+    instances = 1 if mode is ConcurrencyMode.SINGLE_CONNECTION else 2
+    started = await asyncio.gather(
+        *(start_server(fixture, state_dir) for _ in range(instances)), return_exceptions=True
+    )
+    clients = [c for c in started if isinstance(c, WireClient)]
+    failures = [c for c in started if not isinstance(c, WireClient)]
+    setup_error = wire_error = None
+    responses: list[RawResponse] = []
+    windows: list[tuple[float, float]] = []
+    rtts: list[float] = []
+    try:
+        if failures:
+            setup_error = f"server did not start: {failures[0]}"
+        else:
+            for client in clients:
+                pages = await client.list_tools()
+                if any(p.result is None for p in pages):
+                    setup_error = "tools/list failed"
+                rtts.append(await _ping_rtt(client))
+            if setup_error is None:
+                pair = [clients[0], clients[0]] if instances == 1 else clients
+                for response, window in await asyncio.gather(*(_timed_call(c, spec) for c in pair)):
+                    responses.append(response)
+                    windows.append(window)
+    except WireError as exc:
+        wire_error = str(exc)
+    finally:
+        for client in clients:
+            await client.close()
+    try:
+        after = observe(fixture, state_dir)
+    except SetupError as exc:
+        setup_error = setup_error or str(exc)
+        after = None
+    return ConcurrentRun(
+        label, mode, setup_error, wire_error, tuple(responses), tuple(windows), tuple(rtts), before, after
+    )
+
+
+def _concurrent_skip_reason(ev: ToolEvidence, once_ok: Sequence[Session]) -> str | None:
+    c = ev.contract
+    if c is None:
+        return "attempts not run: no contract"
+    if c.read_only is Hint.TRUE or c.idempotent is not FALSIFIABLE[Annotation.IDEMPOTENT]:
+        return "attempts not run: no falsifiable idempotence claim"
+    if not once_ok:
+        return "attempts not run: no completed single-call session to compare against"
+    if ev.once_instability:
+        return "attempts not run: single-call baseline differs across runs"
+    return None
+
+
+def _with_concurrent(
+    fixture: Fixture,
+    ev: ToolEvidence,
+    runs: Sequence[ConcurrentRun],
+    single_call_state: State,
+    control_state: State | None,
+    lifecycle_inert: bool,
+) -> ToolEvidence:
+    note = None
+    usable = list(runs)
+    if not lifecycle_inert:
+        # Two instances start and stop twice as often as a single-call session;
+        # if startup or shutdown writes state, the states are not comparable.
+        usable = [r for r in runs if r.mode is not ConcurrencyMode.TWO_PROCESS]
+        note = "two_process attempts excluded: server startup/shutdown writes business or unclassified state"
+    setup_error = next((f"{r.label}: {r.setup_error}" for r in usable if r.setup_error), None)
+    call_error = next((f"{r.label}: {r.wire_error}" for r in usable if r.wire_error), None)
+    attempts: list[Attempt] = []
+    records: list[ErrorRecord] = []
+    for r in usable:
+        if not r.ok:
+            continue
+        errs = _call_errors(r.responses)
+        if errs:
+            reference = control_state if control_state is not None else r.before
+            changed = _state_changed(fixture, reference, r.after)
+            records += [ErrorRecord(r.label, p, k, changed) for p, k in errs]
+            if not changed:
+                call_error = call_error or f"{r.label}: error response with no state change"
+                continue
+        wire = r.wire_overlap
+        attempts.append(
+            Attempt(
+                label=r.label,
+                mode=r.mode,
+                overlap=r.overlap,
+                wire_overlap_ms=None if wire is None else round(wire * 1000, 3),
+                rtt_ms=tuple(round(t * 1000, 3) for t in r.rtts),
+                observation=Observation("once", deltas(fixture, single_call_state, r.after)),
+            )
+        )
+    return dataclasses.replace(
+        ev,
+        concurrent=tuple(attempts),
+        concurrent_ran=True,
+        concurrent_note=note,
+        concurrent_setup_error=setup_error,
+        concurrent_call_error=call_error,
+        concurrent_errors=tuple(records),
+        concurrent_raw=tuple(runs),
+    )
 
 
 def _listings(

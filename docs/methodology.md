@@ -209,7 +209,7 @@ seeded state is reported as evidence.
 | sequential idempotence | `idempotentHint` | once vs twice, each from clean reset | business state differs |
 | read-only | `readOnlyHint` | control vs once | any observed state differs: business, append-only or unclassified |
 | destructive | `destructiveHint` | control vs once | a pre-existing business or append-only record is gone or overwritten |
-| concurrent idempotence | `idempotentHint` | once vs two concurrent calls | (build step 6) |
+| concurrent idempotence | `idempotentHint` | once vs two concurrent calls, each attempt from clean reset | business state differs in any attempt (one-sided; see below) |
 
 `destructiveHint: false` means additive, not side-effect-free: additions of
 any kind never fail the destructive test. Destruction is reported in two
@@ -232,16 +232,79 @@ the coherence check.
 
 ### Tool errors
 
-A call that returns `isError: true`:
+A call that completes with an error, either a result with `isError: true`
+(`tool_error`) or a JSON-RPC error response (`protocol_error`):
 
-- **with no state change** (against the control state) → `CALL_ERROR`;
-- **with a state change** → judged on the state like any other call, and the
-  verdict's evidence sets `errored_with_side_effects`. Reporting failure does
-  not excuse a write.
+- **with no state change** (session end state against the control state) →
+  `CALL_ERROR`;
+- **with a state change** → judged on the state like any other call.
+  Reporting failure does not excuse a write.
 
-A JSON-RPC error response, or a connection that dies mid-call, is always
-`CALL_ERROR`. Side effects are judged per session, not per call: in a session
-that calls twice, they are attributed to the session as a whole.
+Every errored call is recorded as evidence with its session, its call
+position, its error kind and whether state changed. The
+`errored_with_side_effects` flag is raised **only from single-call
+sessions**, where the change can be attributed to the erroring call. In a
+session that calls twice, the erroring position is recorded but the flag is
+not raised, because the change may have come from the other call.
+
+A connection that dies mid-call is always `CALL_ERROR`: there is no completed
+call whose state could be judged.
+
+### Concurrent idempotence
+
+Two calls are issued at the same time from a clean reset, and the final state
+is compared with the single-call state over business state.
+
+**The test is one-sided.** A single attempt whose final state differs is a
+conclusive VIOLATION: one counterexample refutes "idempotent under
+concurrent calls", provided the single-call baseline was itself identical
+across runs (otherwise `NONDETERMINISTIC`). A PASS means only that **no race
+was observed**; races are intermittent, and their absence in N attempts is
+not proof. For this reason the general rule "a VIOLATION must reproduce in at
+least 3 runs" does not apply to this test, and every concurrent verdict
+reports its attempt counts.
+
+Attempts run in two modes, 20 attempts per mode for fixtures
+(`--concurrent-attempts`):
+
+- **single_connection**: two concurrent requests on one connection to one
+  server instance.
+- **two_process**: two server instances over the same backing store, one call
+  each.
+
+**Overlap** is recorded per attempt:
+
+- `verified`: two_process only. Both calls were in flight together for
+  longer than the two instances' ping round-trip times combined (worst of 3
+  pings each, measured just before the calls). Since each instance handles
+  only its own call, both were being handled at the same moment. That does
+  not mean their critical sections overlapped: a server that locks its store
+  correctly serializes them internally, and should pass.
+- `unverified`: in flight together, but this cannot prove execution overlap.
+  Always the case on a single connection, since a server may handle requests
+  one at a time; our own `malformed-hints` server does.
+- `none`: not even in flight together.
+
+A PASS requires at least one attempt with verified overlap and no diverging
+attempt. With no divergence and no verified overlap the verdict is
+`INCONCLUSIVE / NO_OVERLAP_OBSERVED`, never PASS. Every concurrent verdict
+records which mode produced it: the modes with diverging attempts for a
+VIOLATION, or with verified overlap for a PASS.
+
+If the control sessions show that server startup or shutdown writes business
+or unclassified state, two_process attempts are excluded: two instances
+start and stop twice as often as a single-call session, so their states are
+not comparable.
+
+Attempts are run only where there is a falsifiable idempotence claim to test
+(`idempotentHint: true`, `readOnlyHint` not explicitly `true`) and the
+single-call baseline is stable across runs. Elsewhere the verdict is decided
+by the declaration or the instability alone, and observed concurrent
+behavior is `unobserved`.
+
+Observed with the fixtures: the MCP Python SDK server (`mcp==2.3.0`) does not
+serialize requests on one connection. Two calls to `liar-concurrent` on one
+connection finish together and both insert.
 
 ## Verdicts
 
@@ -283,15 +346,17 @@ The primary reason is the first rule that applies:
    declaration censuses.
 2. Whether the harness can trust its observations: reset failed →
    `SETUP_FAILED`; reset unverified → `RESET_UNVERIFIED`; a session failed to
-   start or list → `SETUP_FAILED`; a transport error, or `isError` with no
-   state change → `CALL_ERROR`; the declared contract differed across
+   start or list → `SETUP_FAILED`; a dead connection, or an error response
+   (`isError` or JSON-RPC error) with no state change → `CALL_ERROR`; the declared contract differed across
    sessions → `NONDETERMINISTIC`; sessions that should end in the same state
    did not (control sessions for read-only and destructive; once and twice
    sessions across runs) → `NONDETERMINISTIC`; fewer than 3 complete runs →
    `NONDETERMINISTIC`.
-3. What was observed: behavior fails in every run → `VIOLATION`; only
-   unclassified state bears on it → `UNCLASSIFIED_STATE`; coverage
-   incomplete → `PARTIAL_COVERAGE`; otherwise `PASS`.
+3. What was observed: behavior fails in every run (concurrent test: in any
+   attempt) → `VIOLATION`; only unclassified state bears on it →
+   `UNCLASSIFIED_STATE`; concurrent test with no verified overlap →
+   `NO_OVERLAP_OBSERVED`; coverage incomplete → `PARTIAL_COVERAGE`;
+   otherwise `PASS`.
 
 A VIOLATION may be issued with incomplete coverage, because the contradiction
 was observed on state the adapter does see. A PASS never can.
@@ -299,9 +364,12 @@ was observed on state the adapter does see. A PASS never can.
 ### Evidence
 
 Every verdict carries the full tri-state contract, the observed property and
-behavior, the affected state categories, `errored_with_side_effects`,
-per-run deltas by state category, coverage, run count, and primary and
-secondary reasons with details.
+behavior, the affected state categories, `errored_with_side_effects` and
+every errored call (session, position, kind, state changed), per-run deltas
+by state category, coverage, run count, and primary and secondary reasons
+with details. Concurrent verdicts also carry every attempt: its mode,
+overlap, in-flight overlap and ping times, and delta against the single-call
+state, plus counts per mode and the mode that produced the verdict.
 
 `NONDETERMINISTIC` evidence names what differed: for each pair of sessions
 that should have matched, the `surface/region.column` columns whose values
@@ -332,14 +400,14 @@ against its expectation and exits non-zero on any mismatch.
 | # | Fixture | What it is | Key expected verdicts |
 |---|---|---|---|
 | 1 | `honest-readonly` | read-only, genuinely reads only | read_only PASS; others SUPERSEDED_BY_READ_ONLY |
-| 2 | `honest-idempotent` | upsert + audit row per call | sequential PASS (append-only changes) |
+| 2 | `honest-idempotent` | upsert + audit row per call | sequential PASS (append-only changes); concurrent PASS from two_process |
 | 3 | `liar-idempotent` | claims idempotent, inserts per call | sequential VIOLATION; destructive PASS |
-| 4 | `liar-concurrent` | check-then-insert, no unique constraint | sequential PASS; concurrent VIOLATION (step 6) |
+| 4 | `liar-concurrent` | check-then-insert, no unique constraint | sequential PASS; concurrent VIOLATION in both modes |
 | 5 | `liar-readonly` | claims read-only, writes an append-only log | read_only VIOLATION |
 | 6 | `silent-safe` | declares nothing, genuinely idempotent | NO_DECLARATION, behavior "holds" |
 | 7 | `opaque` | real state in an unobserved journal file | PARTIAL_COVERAGE, never PASS |
 | 8 | `flaky` | random token per call | NONDETERMINISTIC, naming `sessions.token` |
-| 9 | `malformed-hints` | hand-written JSON-RPC, no SDK; string, number, null, duplicate-key and list annotations over two pages | MALFORMED_DECLARATION; `readOnlyHint: null` does not supersede |
+| 9 | `malformed-hints` | hand-written JSON-RPC, no SDK, one request at a time; string, number, null, duplicate-key and list annotations over two pages; `scribble` writes then returns a JSON-RPC error | MALFORMED_DECLARATION; `readOnlyHint: null` does not supersede; `scribble` VIOLATION with `protocol_error` side effects |
 | 10 | `liar-readonly-error` | claims read-only, writes, returns `isError` | VIOLATION with `errored_with_side_effects`; a clean failure is CALL_ERROR |
 
 Every fixture's `fixture.toml` records the expected verdict for every tool and
@@ -348,7 +416,6 @@ mismatch or missing expectation.
 
 ## Planned, not yet implemented
 
-- **Concurrent idempotence** (build step 6).
 - **Reader divergence, recorded per server** (for the later audit of real
   servers, not release 0.1): alongside the strict contract, record what the
   pinned SDK client would have returned for the same bytes, including the

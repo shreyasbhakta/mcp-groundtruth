@@ -117,6 +117,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
                 "contract_instability": list(ev.contract_instability),
                 "coherence": [] if ev.contract is None else [i.value for i in coherence(ev.contract)],
                 "sessions": [s.to_json() for s in ev.once + ev.twice],
+                "concurrent_sessions": [r.to_json() for r in ev.concurrent_raw],
                 "verdicts": tool_verdicts,
             }
         )
@@ -195,6 +196,18 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append(
                 f"  {tool['tool']:<20} {v['test']:<24} {v['declared']:<10} {verdict:<44} {observed:<26} {mark}"
             )
+            conc = v.get("concurrency")
+            if conc and conc["attempts"]:
+                parts = []
+                for mode, m in conc["modes"].items():
+                    if m["attempts"]:
+                        ov = m["overlap"]
+                        parts.append(
+                            f"{mode}: {m['diverged']}/{m['attempts']} diverged, overlap "
+                            f"verified {ov['verified']} unverified {ov['unverified']} none {ov['none']}"
+                        )
+                by = ", ".join(conc["produced_by"]) or "-"
+                lines.append(f"  {'':<20}   attempts: {'; '.join(parts)}; produced by: {by}")
     exp = report["expectations"]
     lines.append("")
     lines.append(f"  expectations: {exp['matched']}/{exp['checked']} matched")
