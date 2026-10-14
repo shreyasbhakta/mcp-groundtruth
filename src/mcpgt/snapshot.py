@@ -29,7 +29,7 @@ import os
 import sqlite3
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -224,17 +224,32 @@ class FilesystemAdapter(SnapshotAdapter):
     the SHA-256 of a file's bytes, a symlink's target, or empty for a
     directory. Symlinks are recorded, never followed. Modification times,
     permissions and ownership are not treated as state.
+
+    ``delegated`` maps relative paths inside the tree to the surface of
+    another adapter that observes them (e.g. a JSONL file inside the
+    directory). They are skipped here without counting as uncovered.
     """
 
-    def __init__(self, root: Path, label: str, exclude: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        root: Path,
+        label: str,
+        exclude: Iterable[str] = (),
+        delegated: Mapping[str, str] | None = None,
+    ) -> None:
         self.root = Path(root)
         self.surface = f"fs:{label}"
         self.exclude = frozenset(exclude)
+        self.delegated = dict(delegated or {})
 
     def coverage(self) -> Coverage:
         return Coverage(
             surface=self.surface,
-            covered=("paths, kinds and content hashes of every entry not excluded", "symlink targets"),
+            covered=(
+                "paths, kinds and content hashes of every entry not excluded",
+                "symlink targets",
+                *(f"{path}: observed by {surface}" for path, surface in sorted(self.delegated.items())),
+            ),
             uncovered=tuple(f"entry {name} (excluded)" for name in sorted(self.exclude)),
         )
 
@@ -248,10 +263,15 @@ class FilesystemAdapter(SnapshotAdapter):
                     path = Path(dirpath) / name
                     rel = path.relative_to(self.root).as_posix()
                     region = rel.split("/", 1)[0]
-                    if region in self.exclude:
+                    if region in self.exclude or rel in self.delegated:
                         continue
                     records.setdefault(region, []).append(_fs_record(path, rel))
-                dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if not (Path(dirpath) / d).is_symlink()
+                    and (Path(dirpath) / d).relative_to(self.root).as_posix() not in self.delegated
+                ]
         except OSError as exc:
             raise SnapshotError(f"{self.surface}: read failed: {exc}") from exc
         return Snapshot(
@@ -276,47 +296,130 @@ JSON_KEY_COLUMN = "_key"  # the id of a document in a mapping collection
 JSON_VALUE_COLUMN = "_value"  # a document that is not an object, or a scalar collection
 
 
-class JsonStoreAdapter(SnapshotAdapter):
-    """A JSON file whose top-level object maps collection names to collections.
+UNPARSED_REGION = "@unparsed"  # JSONL lines that are not valid JSON
+OTHER_REGION = "@other"  # JSONL documents without the partition field
 
-    A collection is a list of documents, an object mapping ids to documents,
-    or a single value. Each collection is one region with one record per
-    document and one column per field (the union across its documents); a
-    mapping collection adds a ``_key`` column. Nested values are compared as
-    canonical JSON text.
+
+class JsonStoreAdapter(SnapshotAdapter):
+    """A JSON document file, or a JSON Lines file.
+
+    ``document`` format: the top-level object maps collection names to
+    collections. A collection is a list of documents, an object mapping ids
+    to documents, or a single value. Each collection is one region; a
+    mapping collection adds a ``_key`` column.
+
+    ``jsonl`` format: one JSON value per line, compared as a multiset, like
+    table rows. ``partition_by`` names a field whose value selects each
+    document's region (documents without it go to ``@other``); without it,
+    every line is in one region named after the file. Lines that are not
+    valid JSON are kept, verbatim, in ``@unparsed``: they are state too.
+
+    In both formats each document is a record with one column per field
+    (the union across the region's documents); a missing field is
+    ``("absent", None)``, distinct from ``null``. Nested values compare as
+    canonical JSON text, except fields named in ``explode``: each element of
+    such a list becomes its own record in region ``<region>.<field>``,
+    carrying the parent's identifying fields, and the list is removed from
+    the parent record. Use it when appending to a nested list should count
+    as an addition rather than an overwrite of the parent; it treats the
+    list's order and the list itself as having no identity of their own.
     """
 
-    def __init__(self, path: Path, label: str, exclude: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        path: Path,
+        label: str,
+        exclude: Iterable[str] = (),
+        *,
+        format: str = "document",
+        partition_by: str | None = None,
+        explode: Mapping[str, Sequence[str]] | None = None,
+    ) -> None:
+        if format not in ("document", "jsonl"):
+            raise ValueError(f"unknown JSON format {format!r}")
         self.path = Path(path)
         self.surface = f"json:{label}"
         self.exclude = frozenset(exclude)
+        self.format = format
+        self.partition_by = partition_by
+        self.explode = {field: tuple(keys) for field, keys in (explode or {}).items()}
 
     def coverage(self) -> Coverage:
+        unit = "line" if self.format == "jsonl" else "document of every collection"
         return Coverage(
             surface=self.surface,
-            covered=("every document of every collection not excluded",),
-            uncovered=tuple(f"collection {name} (excluded)" for name in sorted(self.exclude)),
+            covered=(f"every {unit} not excluded",),
+            uncovered=tuple(f"region {name} (excluded)" for name in sorted(self.exclude)),
         )
 
     def snapshot(self) -> Snapshot:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            text = self.path.read_text(encoding="utf-8")
         except (OSError, ValueError) as exc:
             raise SnapshotError(f"{self.surface}: cannot read {self.path}: {exc}") from exc
+        groups = self._jsonl_groups(text) if self.format == "jsonl" else self._document_groups(text)
+        regions: list[Region] = []
+        for name, docs in groups.items():
+            regions += _json_regions(name, docs, explode=self.explode)
+        return Snapshot(surface=self.surface, regions=tuple(r for r in regions if r.name not in self.exclude))
+
+    def _document_groups(self, text: str) -> dict[str, Any]:
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise SnapshotError(f"{self.surface}: not JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise SnapshotError(f"{self.surface}: top level is not a JSON object")
-        regions = [_json_region(name, value) for name, value in data.items() if name not in self.exclude]
-        return Snapshot(surface=self.surface, regions=tuple(regions))
+        groups: dict[str, Any] = {}
+        for name, collection in data.items():
+            groups[name] = collection if isinstance(collection, list | dict) else [collection]
+        return groups
+
+    def _jsonl_groups(self, text: str) -> dict[str, Any]:
+        default = Path(self.path).name
+        groups: dict[str, list[Any]] = {}
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                groups.setdefault(UNPARSED_REGION, []).append({"_line": line})
+                continue
+            if self.partition_by is None:
+                name = default
+            elif isinstance(doc, dict) and isinstance(doc.get(self.partition_by), str):
+                name = doc[self.partition_by]
+            else:
+                name = OTHER_REGION
+            groups.setdefault(name, []).append(doc)
+        return groups
 
 
-def _json_region(name: str, collection: Any) -> Region:
-    if isinstance(collection, list):
-        docs: list[tuple[str | None, Any]] = [(None, d) for d in collection]
-    elif isinstance(collection, dict):
-        docs = list(collection.items())
-    else:
-        docs = [(None, collection)]
+def _json_regions(
+    name: str, collection: list[Any] | dict[str, Any], *, explode: Mapping[str, tuple[str, ...]]
+) -> list[Region]:
     keyed = isinstance(collection, dict)
+    docs: list[tuple[str | None, Any]] = (
+        list(collection.items()) if isinstance(collection, dict) else [(None, d) for d in collection]
+    )
+    children: dict[str, list[dict[str, Any]]] = {}
+    parents: list[tuple[str | None, Any]] = []
+    for key, doc in docs:
+        if isinstance(doc, dict):
+            doc = dict(doc)
+            for field, identity in explode.items():
+                if isinstance(doc.get(field), list):
+                    ids = {k: doc.get(k) for k in identity}
+                    children.setdefault(field, []).extend({**ids, "value": v} for v in doc.pop(field))
+        parents.append((key, doc))
+    regions = [_json_region(name, parents, keyed)]
+    for field, rows in children.items():
+        regions.append(_json_region(f"{name}.{field}", [(None, r) for r in rows], keyed=False))
+    return regions
+
+
+def _json_region(name: str, docs: list[tuple[str | None, Any]], keyed: bool) -> Region:
     fields = sorted({k for _, d in docs if isinstance(d, dict) for k in d})
     has_value = any(not isinstance(d, dict) for _, d in docs)
     columns = ([JSON_KEY_COLUMN] if keyed else []) + fields + ([JSON_VALUE_COLUMN] if has_value else [])

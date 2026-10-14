@@ -1,0 +1,84 @@
+# Audit target: the knowledge-graph memory server from the MCP reference
+# servers repository, built from a pinned commit and run in a network-free
+# sandbox that can write only inside its state directory.
+#
+# Audit targets never carry expected verdicts. Every VIOLATION and
+# INCONCLUSIVE in an audit report is a measurement to review, not a finding.
+
+[target]
+name = "memory"
+description = "Knowledge-graph memory server (TypeScript), modelcontextprotocol/servers src/memory."
+command = ["node", "{source}/src/memory/dist/index.js"]
+# The graph file lives inside the sandboxed state directory.
+env = { MEMORY_FILE_PATH = "{state}/memory.jsonl" }
+
+[source]
+repository = "https://github.com/modelcontextprotocol/servers.git"
+commit = "bbb701e7ac1e57f3edd1c2836b94c5457eaf7b9c"  # main, 2026-10-11
+package = "src/memory"
+build = [
+    ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+    ["npm", "run", "build", "--workspace", "src/memory"],
+]
+artifacts = ["src/memory/dist"]
+
+[state]
+# The whole state directory is observed: the sandbox lets the server write
+# nowhere else. The graph file is delegated to the JSONL adapter; anything
+# else left behind (the server's .lock / .lock.break / temp files) shows up as
+# unclassified state in the directory adapter.
+locations = ["fs:.", "json:memory.jsonl"]
+
+[[adapters]]
+kind = "fs"
+label = "."
+
+[[adapters]]
+kind = "json"
+format = "jsonl"
+label = "memory.jsonl"
+seed = "seed/memory.jsonl"
+partition_by = "type"
+# Each observation is its own record keyed by entity name, so appending an
+# observation is an addition, and deleting one is a removal, rather than an
+# overwrite of the whole entity line. Observation order is not treated as state.
+explode = { observations = ["name"] }
+business = ["entity", "entity.observations", "relation"]
+
+# Call arguments, chosen against the seeded graph so every call does real work.
+
+[[tools]]
+name = "create_entities"
+arguments = { entities = [{ name = "Carol", entityType = "person", observations = ["Joined in 2026"] }] }
+
+[[tools]]
+name = "create_relations"
+arguments = { relations = [{ from = "Bob", to = "Acme Corp", relationType = "works_at" }] }
+
+[[tools]]
+name = "add_observations"
+arguments = { observations = [{ entityName = "Bob", contents = ["Plays piano"] }] }
+
+[[tools]]
+name = "delete_entities"
+arguments = { entityNames = ["Bob"] }
+
+[[tools]]
+name = "delete_observations"
+arguments = { deletions = [{ entityName = "Alice", observations = ["Speaks French"] }] }
+
+[[tools]]
+name = "delete_relations"
+arguments = { relations = [{ from = "Alice", to = "Bob", relationType = "knows" }] }
+
+[[tools]]
+name = "read_graph"
+arguments = {}
+
+[[tools]]
+name = "search_nodes"
+arguments = { query = "Acme" }
+
+[[tools]]
+name = "open_nodes"
+arguments = { names = ["Alice", "Acme Corp"] }

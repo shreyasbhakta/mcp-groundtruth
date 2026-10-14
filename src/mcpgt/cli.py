@@ -1,4 +1,4 @@
-"""mcpgt command line: verify-reset, run, report."""
+"""mcpgt command line: verify-reset, prepare, run, report."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ from mcpgt import __version__
 from mcpgt import fixture as fixtures
 from mcpgt import report as reports
 from mcpgt.runner import run_fixture, verify_reset
+from mcpgt.sandbox import IsolationUnavailable
+from mcpgt.sources import SourceError
+from mcpgt.sources import prepare as prepare_source
 from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, ResetStatus, derive
 
 EXIT_OK, EXIT_UNEXPECTED, EXIT_USAGE = 0, 1, 2
@@ -30,7 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     vr.add_argument("--json", action="store_true", help="print the full result as JSON")
 
     run = sub.add_parser("run", help="run the test battery against a fixture")
-    run.add_argument("fixture")
+    run.add_argument("fixture", help="fixture or target name, or a path")
+    run.add_argument(
+        "--audit",
+        action="store_true",
+        help="audit mode: no expected verdicts, full report, exit 0 whatever the verdicts (required for targets)",
+    )
     run.add_argument("--tool", help="only this tool")
     run.add_argument("--runs", type=int, default=MIN_RUNS, help=f"independent runs per test (min {MIN_RUNS})")
     run.add_argument(
@@ -40,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
         help=f"concurrent attempts per mode (default {CONCURRENT_ATTEMPTS})",
     )
     run.add_argument("--runs-dir", type=Path, default=reports.RUNS_DIR, help="where reports are written")
+
+    prep = sub.add_parser("prepare", help="fetch and build a target's pinned source (uses the network)")
+    prep.add_argument("fixture", metavar="target", help="target name under targets/, or a path")
 
     rep = sub.add_parser("report", help="show a saved report")
     rep.add_argument("run_id", help="run id, or a path to report.json")
@@ -56,7 +67,25 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     if args.command == "verify-reset":
         return _verify_reset(fx, args.json)
+    if args.command == "prepare":
+        return _prepare(fx)
     return _run(fx, args)
+
+
+def _prepare(fx: fixtures.Fixture) -> int:
+    if fx.source is None:
+        print(f"error: {fx.name} has no [source] to prepare", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        source = prepare_source(fx.source, log=lambda line: print(line, flush=True))
+    except SourceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"prepared {source.spec.repository} @ {source.spec.commit}")
+    print(f"  package: {source.package_name} {source.package_version}")
+    print(f"  artifacts sha256: {source.content_sha256}")
+    print(f"  checkout: {source.path}")
+    return EXIT_OK
 
 
 def _verify_reset(fx: fixtures.Fixture, as_json: bool) -> int:
@@ -85,6 +114,9 @@ def _verify_reset(fx: fixtures.Fixture, as_json: bool) -> int:
 
 
 def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
+    if fx.is_target and not args.audit:
+        print(f"error: {fx.name} is an audit target with no expected verdicts; use --audit", file=sys.stderr)
+        return EXIT_USAGE
     try:
         with tempfile.TemporaryDirectory(prefix="mcpgt-") as tmp:
             run = asyncio.run(
@@ -96,13 +128,15 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
                     concurrent_attempts=args.concurrent_attempts,
                 )
             )
-    except ValueError as exc:
+    except (ValueError, SourceError, IsolationUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    report = reports.build(run, derive(run), reports.new_run_id(fx))
+    report = reports.build(run, derive(run), reports.new_run_id(fx), audit=args.audit)
     path = reports.write(report, args.runs_dir)
     print(reports.render_text(report))
     print(f"\nreport: {path}")
+    if args.audit:
+        return EXIT_OK
     return EXIT_OK if not report["expectations"]["mismatches"] else EXIT_UNEXPECTED
 
 

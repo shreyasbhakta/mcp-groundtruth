@@ -121,7 +121,20 @@ never collapsed. Three adapters are provided:
 |---|---|---|---|
 | `sqlite` | one database file | each table, plus `@schema` (every table, index, view and trigger definition) and `@pragma` (`user_version`, `application_id`) | rows, with their SQLite storage class |
 | `fs` | one directory tree | each top-level entry | (path, kind, SHA-256 of content or symlink target) |
-| `json` | one JSON document file | each top-level collection | documents, one column per field |
+| `json` (`format = "document"`) | one JSON document file | each top-level collection | documents, one column per field |
+| `json` (`format = "jsonl"`) | one JSON Lines file | one region, or one per value of `partition_by` | lines, compared as a multiset; unparsable lines kept verbatim in `@unparsed` |
+
+A `json` adapter may declare `explode`: each element of a nested list field
+becomes its own record in region `<region>.<field>`, carrying the parent's
+identifying fields, and the list leaves the parent record. Without it,
+appending to a nested list overwrites the parent record, which the
+destructive test would count as destruction. With it, an append is an
+addition and a deletion is a removal; the list's order is no longer state.
+Like masks, this is a declared modeling decision, never inferred.
+
+An `fs` adapter may observe the whole state directory (`label = "."`).
+Files inside it that another adapter observes are delegated to that adapter
+rather than hashed twice, and still count as covered.
 
 Values keep their type: `1`, `1.0`, `"1"` and `true` are distinct, and a JSON
 field that is missing differs from one that is `null`. Not treated as state:
@@ -429,6 +442,40 @@ against its expectation and exits non-zero on any mismatch.
 Every fixture's `fixture.toml` records the expected verdict for every tool and
 implemented test; `tests/test_ground_truth.py` runs them all and fails on any
 mismatch or missing expectation.
+
+## Audit targets
+
+Fixtures validate the harness. **Audit targets** are third-party servers it
+measures. A target lives in `targets/<name>/target.toml`, with the same
+adapters, classification and masks as a fixture, plus:
+
+- **No expected verdicts, ever.** The loader rejects a target that declares
+  any. There is no ground truth for someone else's server, only measurements.
+- **A pinned source.** `[source]` names a repository, a full 40-character
+  commit SHA, build commands, and the build artifacts to digest.
+  `mcpgt prepare <target>` is the only step that uses the network: it fetches
+  exactly that commit into `.mcpgt/sources/` and builds it there. Before
+  every run the harness verifies, offline, that the checkout is still at the
+  commit, that no tracked file is modified, and that it was built with the
+  commands now in the definition. The server is always started from that
+  checkout, never fetched from a package registry at run time.
+- **A sandbox.** Targets always run without network access. On macOS,
+  `sandbox-exec` denies all network operations and all file writes outside
+  the state directory; on Linux, `unshare --net --map-root-user` gives the
+  server a network namespace with only loopback (file writes not confined).
+  If no mechanism works, the audit refuses to run. With write confinement
+  and an `fs` adapter on the whole state directory, every file the server
+  can persist is observed by construction; state held only in process
+  memory dies with the process.
+- **Audit mode.** `mcpgt run <target> --audit` writes the full report and
+  exits 0 whatever the verdicts. Reports record `mode: "audit"`, the
+  repository and commit, the package name and version, a digest of the built
+  artifacts, the build toolchain and commands, and the sandbox used. Every
+  VIOLATION and INCONCLUSIVE in an audit report is to be reviewed by hand
+  before it is believed or reported.
+
+Call arguments for each tool are declared in the target definition, chosen
+against the seeded state so that each call does real work.
 
 ## Planned, not yet implemented
 

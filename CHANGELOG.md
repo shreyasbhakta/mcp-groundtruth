@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Audit targets (`targets/<name>/target.toml`): third-party servers with no
+  expected verdicts, and `mcpgt run <target> --audit`, which writes the full
+  report and exits 0 regardless of verdicts.
+- Pinned sources: `mcpgt prepare <target>` fetches one commit and builds it;
+  every run verifies the checkout offline and records repository, commit,
+  package, artifact digest and toolchain in provenance.
+- Sandboxed server processes for targets: no network (macOS `sandbox-exec`,
+  Linux `unshare`), and on macOS no file writes outside the state directory.
+- JSON Lines support in the JSON adapter, with `partition_by` and `explode`;
+  a directory adapter can observe the whole state directory and delegate
+  nested files to other adapters.
+- `targets/memory`: the reference memory server pinned at
+  `modelcontextprotocol/servers@bbb701e`.
+
+### Changed
+
+- Report schema `mcpgt.report/0.2`: adds `mode`, `kind`, and provenance
+  `definition` and `runtime`.
+
 ## [0.1.0] - 2026-10-13
 
 First release. Validates the harness against fixture servers with known

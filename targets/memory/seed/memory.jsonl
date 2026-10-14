@@ -1,0 +1,7 @@
+{"type":"entity","name":"Alice","entityType":"person","observations":["Works at Acme Corp","Speaks French"]}
+{"type":"entity","name":"Bob","entityType":"person","observations":["Plays chess"]}
+{"type":"entity","name":"Acme Corp","entityType":"organization","observations":["Founded in 2001"]}
+{"type":"entity","name":"Paris","entityType":"city","observations":["Capital of France"]}
+{"type":"relation","from":"Alice","to":"Acme Corp","relationType":"works_at"}
+{"type":"relation","from":"Alice","to":"Bob","relationType":"knows"}
+{"type":"relation","from":"Acme Corp","to":"Paris","relationType":"headquartered_in"}

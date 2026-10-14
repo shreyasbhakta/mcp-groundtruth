@@ -189,11 +189,13 @@ constraint. Sequential calls look idempotent. Concurrent calls both insert.
 |---|---|
 | `mcpgt verify-reset <fixture> [--json]` | Reset twice and confirm identical normalized state. |
 | `mcpgt run <fixture> [--tool NAME] [--runs N] [--concurrent-attempts N] [--runs-dir DIR]` | Run the test battery, write a JSON report, print a summary. |
+| `mcpgt prepare <target>` | Fetch and build an audit target's pinned source (the only networked step). |
+| `mcpgt run <target> --audit` | Audit a third-party server: no expected verdicts, sandboxed, always exits 0. |
 | `mcpgt report <run-id> [--format text\|json] [--runs-dir DIR]` | Show a saved report. |
 | `mcpgt --version` | Print the version. |
 
-`<fixture>` is a directory name under `fixtures/` or a path to a fixture
-directory. `--runs` defaults to and may not be below 3.
+`<fixture>` / `<target>` is a directory name under `fixtures/` or `targets/`,
+or a path to one. `--runs` defaults to and may not be below 3.
 `--concurrent-attempts` (per mode) defaults to 20.
 
 | Exit code | Meaning |
@@ -293,6 +295,24 @@ seeded state. This prevents a typo from silently changing what is compared.
 
 ---
 
+## Auditing third-party servers
+
+*Unreleased: on `main`, not in 0.1.0.* Audit targets live in `targets/`.
+Each pins a repository commit, builds it locally, and runs it in a sandbox
+with no network access (macOS also confines file writes to the state
+directory). Targets never carry expected verdicts; audit reports are
+measurements for review. `targets/memory` pins the reference memory server
+from `modelcontextprotocol/servers`. See
+[docs/methodology.md](docs/methodology.md#audit-targets).
+
+```bash
+uv run mcpgt prepare memory          # fetch the pinned commit and build it
+uv run mcpgt verify-reset memory     # prove the seeded state resets exactly
+uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
+```
+
+---
+
 ## Design guarantees
 
 - **Absence is never false.** Hints are an explicit tri-state type that
@@ -349,8 +369,11 @@ src/mcpgt/
   verdict.py     verdict derivation and declaration coherence
   report.py      JSON reports, expectation checks, text summary
   provenance.py  source, harness and capture provenance
+  sources.py     pinned third-party sources: prepare and offline verification
+  sandbox.py     network-free (and on macOS write-confined) server processes
   cli.py         command line
 fixtures/        ground-truth servers
+targets/         audit targets (no expected verdicts)
 docs/            methodology
 tests/
 ```

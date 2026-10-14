@@ -31,16 +31,20 @@ class SourceProvenance:
 
 @dataclass(frozen=True, slots=True)
 class CaptureProvenance:
-    server: SourceProvenance
+    server: SourceProvenance  # the code that ran as the server
     harness: SourceProvenance
     initialize_response: str | None  # verbatim, includes serverInfo and protocolVersion
     captured_at: str  # ISO-8601 UTC
     python_version: str
+    definition: SourceProvenance | None = None  # the fixture.toml / target.toml directory
+    runtime: dict[str, Any] | None = None  # toolchain versions, sandbox
 
     def to_json(self) -> dict[str, Any]:
         return {
             "server": self.server.to_json(),
+            "definition": None if self.definition is None else self.definition.to_json(),
             "harness": self.harness.to_json(),
+            "runtime": self.runtime,
             "initialize_response": self.initialize_response,
             "captured_at": self.captured_at,
             "python_version": self.python_version,

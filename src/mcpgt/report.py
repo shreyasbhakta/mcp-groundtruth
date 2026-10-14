@@ -22,7 +22,7 @@ from mcpgt.runner import FixtureRun
 from mcpgt.snapshot import StateCategory
 from mcpgt.verdict import IMPLEMENTED, Outcome, Reason, Verdict, coherence
 
-SCHEMA = "mcpgt.report/0.1"
+SCHEMA = "mcpgt.report/0.2"
 RUNS_DIR = Path("runs")
 
 
@@ -31,15 +31,40 @@ def provenance(run: FixtureRun) -> CaptureProvenance:
     fx_sha, fx_dirty = git_state(fx.root)
     pkg_dir = Path(mcpgt.__file__).parent
     h_sha, h_dirty = git_state(pkg_dir)
+    definition = SourceProvenance(
+        source=f"{'targets' if fx.is_target else 'fixtures'}/{fx.root.name}",
+        git_sha=fx_sha,
+        git_dirty=fx_dirty,
+        package=None,
+        package_version=None,
+        content_sha256=tree_sha256(fx.root, fx.source_files()),
+    )
+    source = None if run.launch is None else run.launch.source
+    if source is not None:
+        # Verified before the run: at the pinned commit, no tracked file modified.
+        server = SourceProvenance(
+            source=source.spec.repository,
+            git_sha=source.spec.commit,
+            git_dirty=False,
+            package=source.package_name,
+            package_version=source.package_version,
+            content_sha256=source.content_sha256,
+        )
+    else:
+        server = definition
+    iso = None if run.launch is None else run.launch.isolation
+    runtime: dict[str, Any] = {
+        "mcp_python_sdk": importlib.metadata.version("mcp"),
+        "isolation": None if iso is None else iso.to_json(),
+    }
+    if source is not None:
+        runtime["build_toolchain"] = source.toolchain
+        runtime["prepared_at"] = source.prepared_at
+        runtime["build_commands"] = [list(c) for c in source.spec.build]
     return CaptureProvenance(
-        server=SourceProvenance(
-            source=f"fixtures/{fx.root.name}",
-            git_sha=fx_sha,
-            git_dirty=fx_dirty,
-            package="mcp",  # fixture servers run on the SDK's server side
-            package_version=importlib.metadata.version("mcp"),
-            content_sha256=tree_sha256(fx.root, fx.source_files()),
-        ),
+        server=server,
+        definition=definition,
+        runtime=runtime,
         harness=SourceProvenance(
             source="mcpgt",
             git_sha=h_sha,
@@ -89,7 +114,9 @@ def expectation_check(verdict: Verdict, expected: Expectation) -> list[str]:
     return problems
 
 
-def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, Any]:
+def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = False) -> dict[str, Any]:
+    """The report. In audit mode no verdict is compared with anything: there is
+    no ground truth for a third-party server, only measurements to review."""
     fx = run.fixture
     specs = {t.name: t for t in fx.tools}
     tools = []
@@ -100,7 +127,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
         tool_verdicts = []
         for v in (v for v in verdicts if v.tool == ev.tool):
             entry = v.to_json()
-            expected = specs[ev.tool].expected.get(v.test)
+            expected = None if audit else specs[ev.tool].expected.get(v.test)
             if expected is not None:
                 problems = expectation_check(v, expected)
                 checked += 1
@@ -109,7 +136,8 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
                 if problems:
                     mismatches.append({"tool": ev.tool, "test": v.test.value, "problems": problems})
             tool_verdicts.append(entry)
-        not_run += [f"{ev.tool}/{t.value}" for t in specs[ev.tool].expected if t not in IMPLEMENTED]
+        if not audit:
+            not_run += [f"{ev.tool}/{t.value}" for t in specs[ev.tool].expected if t not in IMPLEMENTED]
         tools.append(
             {
                 "tool": ev.tool,
@@ -125,7 +153,9 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
         "schema": SCHEMA,
         "run_id": run_id,
         "fixture": fx.name,
-        "scope": "fixture server written for mcpgt; not a third-party server",
+        "mode": "audit" if audit else "validation",
+        "kind": fx.kind,
+        "scope": _scope(run, audit),
         "run_count": run.runs,
         "provenance": provenance(run).to_json(),
         "reset_verification": run.reset.to_json(),
@@ -144,12 +174,24 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
         "tools": tools,
         "untested_tools": list(run.untested_tools),
         "expectations": {
+            "mode": "none (audit)" if audit else "checked against fixture ground truth",
             "checked": checked,
             "matched": matched,
             "mismatches": mismatches,
             "not_run": not_run,
         },
     }
+
+
+def _scope(run: FixtureRun, audit: bool) -> str:
+    fx = run.fixture
+    source = None if run.launch is None else run.launch.source
+    if fx.is_target and source is not None:
+        where = f"{source.spec.repository} at {source.spec.commit}"
+        return f"third-party server {where}, run in a network-free sandbox; verdicts are unreviewed measurements"
+    if audit:
+        return "audit run; verdicts are unreviewed measurements"
+    return "fixture server written for mcpgt; not a third-party server"
 
 
 def new_run_id(fixture: Fixture) -> str:
@@ -174,7 +216,10 @@ def load(run_id: str, runs_dir: Path = RUNS_DIR) -> dict[str, Any]:
 
 
 def render_text(report: dict[str, Any]) -> str:
-    lines = [f"{report['fixture']}  run {report['run_id']}  ({report['run_count']} runs)"]
+    audit = report.get("mode") == "audit"
+    title = "AUDIT  " if audit else ""
+    lines = [f"{title}{report['fixture']}  run {report['run_id']}  ({report['run_count']} runs)"]
+    lines.append(f"  scope: {report['scope']}")
     rv = report["reset_verification"]
     lines.append(f"  reset: {rv['status']}" + (f" ({rv['detail']})" if rv["detail"] else ""))
     cov = rv["coverage"]
@@ -211,7 +256,10 @@ def render_text(report: dict[str, Any]) -> str:
                 lines.append(f"  {'':<20}   attempts: {'; '.join(parts)}; produced by: {by}")
     exp = report["expectations"]
     lines.append("")
-    lines.append(f"  expectations: {exp['matched']}/{exp['checked']} matched")
+    if audit:
+        lines.append("  audit mode: no expected verdicts; every VIOLATION and INCONCLUSIVE needs review")
+    else:
+        lines.append(f"  expectations: {exp['matched']}/{exp['checked']} matched")
     for m in exp["mismatches"]:
         lines.append(f"    {m['tool']}/{m['test']}: {'; '.join(m['problems'])}")
     if exp["not_run"]:

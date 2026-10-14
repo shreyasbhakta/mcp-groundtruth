@@ -65,7 +65,9 @@ def test_report_carries_raw_listing_and_provenance(first):
     assert report["listing"]["stable"]
     prov = report["provenance"]
     assert prov["server"]["source"] == "fixtures/honest-idempotent"
-    assert prov["server"]["package_version"] == "2.3.0"
+    assert prov["runtime"]["mcp_python_sdk"] == "2.3.0"
+    assert prov["runtime"]["isolation"] is None  # fixtures are this project's own code
+    assert prov["definition"]["source"] == "fixtures/honest-idempotent"
     assert len(prov["server"]["content_sha256"]) == 64
     assert '"serverInfo"' in prov["initialize_response"]
 

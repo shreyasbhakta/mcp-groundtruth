@@ -26,7 +26,10 @@ from typing import Any
 from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
 from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec
 from mcpgt.normalize import NormalizationError
+from mcpgt.sandbox import Isolation, isolated, isolation
 from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, StateCategory, diff
+from mcpgt.sources import PreparedSource
+from mcpgt.sources import verify as verify_source
 from mcpgt.verdict import (
     CONCURRENT_ATTEMPTS,
     FALSIFIABLE,
@@ -55,19 +58,22 @@ def reset(fixture: Fixture, state_dir: Path) -> None:
     if state_dir.exists():
         shutil.rmtree(state_dir)
     state_dir.mkdir(parents=True)
-    for spec in fixture.adapters:
+    # Outer directories first, so a file seeded inside a seeded tree lands last.
+    for spec in sorted(fixture.adapters, key=lambda a: (a.label != ".", a.depth)):
         target = state_dir / spec.label
         seed = None if spec.seed is None else fixture.root / spec.seed
         try:
+            if spec.kind == "fs":
+                if seed is None:
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    shutil.copytree(seed, target, symlinks=True, dirs_exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             if spec.kind == "sqlite":
                 _seed_sqlite(target, seed)
-            elif spec.kind == "fs":
-                if seed is None:
-                    target.mkdir(parents=True)
-                else:
-                    shutil.copytree(seed, target, symlinks=True)
             elif seed is None:
-                target.write_text("{}\n")
+                target.write_text("" if spec.json_format == "jsonl" else "{}\n")
             else:
                 shutil.copyfile(seed, target)
         except (sqlite3.Error, OSError) as exc:
@@ -152,10 +158,38 @@ def server_env(state_dir: Path) -> dict[str, str]:
     return env
 
 
-async def start_server(fixture: Fixture, state_dir: Path, timeout: float = 10.0) -> WireClient:
-    client = await WireClient.start(
-        fixture.server_command(), env=server_env(state_dir), cwd=fixture.root, timeout=timeout
-    )
+@dataclass(frozen=True, slots=True)
+class Launch:
+    """How to start the server under test, resolved once per run."""
+
+    command: tuple[str, ...]
+    env: dict[str, str]
+    cwd: Path
+    isolation: Isolation | None
+    source: PreparedSource | None
+
+
+def launch_for(fixture: Fixture, state_dir: Path) -> Launch:
+    """Resolve the server command. For targets, first verify the pinned source
+    (SourceError) and the sandbox (IsolationUnavailable): a target never runs
+    from an unverified checkout or with network access."""
+    source = verify_source(fixture.source) if fixture.source is not None else None
+    source_path = None if source is None else source.path
+    command = fixture.server_command(source_path)
+    env = {**server_env(state_dir), **fixture.server_env(state_dir, source_path)}
+    if not fixture.isolated:
+        return Launch(tuple(command), env, fixture.root, None, source)
+    iso = isolation()
+    # Targets run with the state directory as working directory, so relative
+    # writes land in observed state rather than in the target definition.
+    return Launch(tuple(isolated(command, state_dir)), env, state_dir.resolve(), iso, source)
+
+
+async def start_server(
+    fixture: Fixture, state_dir: Path, timeout: float = 10.0, launch: Launch | None = None
+) -> WireClient:
+    launch = launch or launch_for(fixture, state_dir)
+    client = await WireClient.start(launch.command, env=launch.env, cwd=launch.cwd, timeout=timeout)
     try:
         await client.initialize()
     except BaseException:
@@ -207,7 +241,13 @@ class Session:
         }
 
 
-async def run_session(fixture: Fixture, state_dir: Path, label: str, calls: Sequence[ToolSpec] = ()) -> Session:
+async def run_session(
+    fixture: Fixture,
+    state_dir: Path,
+    label: str,
+    calls: Sequence[ToolSpec] = (),
+    launch: Launch | None = None,
+) -> Session:
     names = tuple(c.name for c in calls)
     try:
         reset(fixture, state_dir)
@@ -215,7 +255,7 @@ async def run_session(fixture: Fixture, state_dir: Path, label: str, calls: Sequ
     except SetupError as exc:
         return Session(label, names, setup_error=str(exc))
     try:
-        client = await start_server(fixture, state_dir)
+        client = await start_server(fixture, state_dir, launch=launch)
     except (WireError, OSError) as exc:
         return Session(label, names, setup_error=f"server did not start: {exc}", before=before)
 
@@ -309,6 +349,7 @@ class FixtureRun:
     listing_errors: tuple[str, ...]
     tools: tuple[ToolEvidence, ...]
     untested_tools: tuple[str, ...] = field(default=())  # listed by the server, no ToolSpec
+    launch: Launch | None = None
 
     @property
     def control_stable(self) -> bool:
@@ -339,6 +380,7 @@ async def run_fixture(
     if only_tool is not None and not specs:
         raise ValueError(f"fixture {fixture.name} has no tool spec named {only_tool!r}")
     state_dir = work_dir / "state"
+    launch = launch_for(fixture, state_dir)  # targets: verify pinned source and sandbox first
     reset_result = verify_reset(fixture, state_dir)
     coverage = fixture.coverage(state_dir)
 
@@ -346,12 +388,12 @@ async def run_fixture(
     per_tool: dict[str, tuple[list[Session], list[Session]]] = {s.name: ([], []) for s in specs}
     if reset_result.status is not ResetStatus.SETUP_FAILED:
         for i in range(1, runs + 1):
-            controls.append(await run_session(fixture, state_dir, f"control-{i}"))
+            controls.append(await run_session(fixture, state_dir, f"control-{i}", launch=launch))
         for spec in specs:
             once, twice = per_tool[spec.name]
             for i in range(1, runs + 1):
-                once.append(await run_session(fixture, state_dir, f"{spec.name}/once-{i}", [spec]))
-                twice.append(await run_session(fixture, state_dir, f"{spec.name}/twice-{i}", [spec, spec]))
+                once.append(await run_session(fixture, state_dir, f"{spec.name}/once-{i}", [spec], launch))
+                twice.append(await run_session(fixture, state_dir, f"{spec.name}/twice-{i}", [spec, spec], launch))
 
     if reset_result.status is ResetStatus.SETUP_FAILED:
         control_error = reset_result.detail
@@ -415,7 +457,7 @@ async def run_fixture(
         for mode in modes:
             for n in range(1, concurrent_attempts + 1):
                 label = f"{spec.name}/{mode.value}-{n}"
-                attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, label))
+                attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, label, launch))
         evidence[i] = _with_concurrent(fixture, ev, attempts_raw, _end(once_ok[0]), baseline, lifecycle_inert)
 
     listed = {name for contracts in contract_sets for name in contracts}
@@ -432,6 +474,7 @@ async def run_fixture(
         listing_errors=listing_errors,
         tools=tuple(evidence),
         untested_tools=tuple(sorted(listed - {s.name for s in fixture.tools})),
+        launch=launch,
     )
 
 
@@ -569,7 +612,12 @@ async def _timed_call(client: WireClient, spec: ToolSpec) -> tuple[RawResponse, 
 
 
 async def run_concurrent(
-    fixture: Fixture, state_dir: Path, spec: ToolSpec, mode: ConcurrencyMode, label: str
+    fixture: Fixture,
+    state_dir: Path,
+    spec: ToolSpec,
+    mode: ConcurrencyMode,
+    label: str,
+    launch: Launch | None = None,
 ) -> ConcurrentRun:
     """reset -> start (one or two instances) -> list -> ping -> two calls at once -> stop -> observe."""
     try:
@@ -579,7 +627,7 @@ async def run_concurrent(
         return ConcurrentRun(label, mode, setup_error=str(exc))
     instances = 1 if mode is ConcurrencyMode.SINGLE_CONNECTION else 2
     started = await asyncio.gather(
-        *(start_server(fixture, state_dir) for _ in range(instances)), return_exceptions=True
+        *(start_server(fixture, state_dir, launch=launch) for _ in range(instances)), return_exceptions=True
     )
     clients = [c for c in started if isinstance(c, WireClient)]
     failures = [c for c in started if not isinstance(c, WireClient)]
