@@ -106,6 +106,12 @@ arguments = { path = "todo.txt", content = "- buy bread\n" }
 name = "edit_file"
 arguments = { path = "notes.txt", edits = [{ oldText = "Status: draft", newText = "Status: final" }] }
 
+# newText still contains oldText, so a repeat matches and applies again.
+[[tools]]
+name = "edit_file"
+variant = "reapplies"
+arguments = { path = "notes.txt", edits = [{ oldText = "Owner: Alice", newText = "Owner: Alice and Bob" }] }
+
 # dryRun returns the diff and writes nothing (lib.ts applyFileEdits).
 [[tools]]
 name = "edit_file"
