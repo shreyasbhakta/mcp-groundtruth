@@ -121,7 +121,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
     """The report. In audit mode no verdict is compared with anything: there is
     no ground truth for a third-party server, only measurements to review."""
     fx = run.fixture
-    specs = {t.name: t for t in fx.tools}
+    specs = {t.key: t for t in fx.tools}
     tools = []
     checked = matched = 0
     mismatches: list[dict[str, Any]] = []
@@ -144,6 +144,9 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
         tools.append(
             {
                 "tool": ev.tool,
+                "name": specs[ev.tool].name,
+                "variant": specs[ev.tool].variant,
+                "arguments": specs[ev.tool].arguments,
                 "contract": None if ev.contract is None else ev.contract.to_json(),
                 "contract_instability": list(ev.contract_instability),
                 "coherence": [] if ev.contract is None else [i.value for i in coherence(ev.contract)],
@@ -162,7 +165,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
         "definition": {
             "locations": list(fx.locations),
             "adapters": [a.to_json() for a in fx.adapters],
-            "tool_arguments": {t.name: t.arguments for t in fx.tools},
+            "tool_arguments": {t.key: t.arguments for t in fx.tools},
         },
         "run_count": run.runs,
         "provenance": provenance(run).to_json(),

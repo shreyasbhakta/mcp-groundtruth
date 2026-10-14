@@ -376,29 +376,38 @@ async def run_fixture(
     fixture: Fixture,
     work_dir: Path,
     runs: int = MIN_RUNS,
-    only_tool: str | None = None,
+    only_tools: Sequence[str] | None = None,
     concurrent_attempts: int = CONCURRENT_ATTEMPTS,
+    observe_concurrent: bool = False,
 ) -> FixtureRun:
+    """Run every test for every tool spec.
+
+    ``observe_concurrent`` also runs concurrent attempts for tools with no
+    falsifiable idempotence claim, as observation only: their verdict is
+    decided by the declaration as always, with the observed behavior attached.
+    """
     if runs < MIN_RUNS:
         raise ValueError(f"at least {MIN_RUNS} runs are required (got {runs})")
-    specs = [t for t in fixture.tools if only_tool is None or t.name == only_tool]
-    if only_tool is not None and not specs:
-        raise ValueError(f"fixture {fixture.name} has no tool spec named {only_tool!r}")
+    wanted = set(only_tools or ())
+    specs = [t for t in fixture.tools if not wanted or {t.name, t.key} & wanted]
+    unknown = wanted - {n for t in fixture.tools for n in (t.name, t.key)}
+    if unknown:
+        raise ValueError(f"{fixture.name} has no tool spec named {', '.join(sorted(unknown))}")
     state_dir = work_dir / "state"
     launch = launch_for(fixture, state_dir)  # targets: verify pinned source and sandbox first
     reset_result = verify_reset(fixture, state_dir)
     coverage = fixture.coverage(state_dir)
 
     controls: list[Session] = []
-    per_tool: dict[str, tuple[list[Session], list[Session]]] = {s.name: ([], []) for s in specs}
+    per_tool: dict[str, tuple[list[Session], list[Session]]] = {s.key: ([], []) for s in specs}
     if reset_result.status is not ResetStatus.SETUP_FAILED:
         for i in range(1, runs + 1):
             controls.append(await run_session(fixture, state_dir, f"control-{i}", launch=launch))
         for spec in specs:
-            once, twice = per_tool[spec.name]
+            once, twice = per_tool[spec.key]
             for i in range(1, runs + 1):
-                once.append(await run_session(fixture, state_dir, f"{spec.name}/once-{i}", [spec], launch))
-                twice.append(await run_session(fixture, state_dir, f"{spec.name}/twice-{i}", [spec, spec], launch))
+                once.append(await run_session(fixture, state_dir, f"{spec.key}/once-{i}", [spec], launch))
+                twice.append(await run_session(fixture, state_dir, f"{spec.key}/twice-{i}", [spec, spec], launch))
 
     if reset_result.status is ResetStatus.SETUP_FAILED:
         control_error = reset_result.detail
@@ -417,7 +426,7 @@ async def run_fixture(
 
     evidence = []
     for spec in specs:
-        once, twice = per_tool[spec.name]
+        once, twice = per_tool[spec.key]
         contract, contract_error, contract_instability = _contract_for(spec.name, contract_sets, listing_errors)
         call_error, side_effects, errors = _error_evidence(fixture, once, twice, baseline)
         idempotence = tuple(
@@ -430,7 +439,7 @@ async def run_fixture(
         )
         evidence.append(
             ToolEvidence(
-                tool=spec.name,
+                tool=spec.key,
                 contract=contract,
                 contract_error=contract_error,
                 contract_instability=contract_instability,
@@ -450,8 +459,8 @@ async def run_fixture(
     # to test, so the 2 x N extra sessions are spent where they can decide.
     lifecycle_inert = all(not any(o.changed(c) for c in StateCategory) for o in control_effect)
     for i, (spec, ev) in enumerate(zip(specs, evidence, strict=True)):
-        once_ok = [o for o in per_tool[spec.name][0] if o.ok]
-        reason = _concurrent_skip_reason(ev, once_ok)
+        once_ok = [o for o in per_tool[spec.key][0] if o.ok]
+        reason = _concurrent_skip_reason(ev, once_ok, observe_concurrent)
         if reason is not None:
             evidence[i] = dataclasses.replace(ev, concurrent_note=reason)
             continue
@@ -461,9 +470,13 @@ async def run_fixture(
         modes = [m for m in ConcurrencyMode if lifecycle_inert or m is not ConcurrencyMode.TWO_PROCESS]
         for mode in modes:
             for n in range(1, concurrent_attempts + 1):
-                label = f"{spec.name}/{mode.value}-{n}"
+                label = f"{spec.key}/{mode.value}-{n}"
                 attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, label, launch))
         evidence[i] = _with_concurrent(fixture, ev, attempts_raw, _end(once_ok[0]), baseline, lifecycle_inert)
+        if observe_concurrent and not _falsifiable_idempotence(ev):
+            note = "observation only (--observe-concurrent): no falsifiable idempotence claim"
+            prior = evidence[i].concurrent_note
+            evidence[i] = dataclasses.replace(evidence[i], concurrent_note=f"{note}; {prior}" if prior else note)
 
     listed = {name for contracts in contract_sets for name in contracts}
     return FixtureRun(
@@ -669,11 +682,17 @@ async def run_concurrent(
     )
 
 
-def _concurrent_skip_reason(ev: ToolEvidence, once_ok: Sequence[Session]) -> str | None:
+def _falsifiable_idempotence(ev: ToolEvidence) -> bool:
+    c = ev.contract
+    return c is not None and c.read_only is not Hint.TRUE and c.idempotent is FALSIFIABLE[Annotation.IDEMPOTENT]
+
+
+def _concurrent_skip_reason(ev: ToolEvidence, once_ok: Sequence[Session], observe: bool = False) -> str | None:
     c = ev.contract
     if c is None:
         return "attempts not run: no contract"
-    if c.read_only is Hint.TRUE or c.idempotent is not FALSIFIABLE[Annotation.IDEMPOTENT]:
+    falsifiable = c.read_only is not Hint.TRUE and c.idempotent is FALSIFIABLE[Annotation.IDEMPOTENT]
+    if not falsifiable and not observe:
         return "attempts not run: no falsifiable idempotence claim"
     if not once_ok:
         return "attempts not run: no completed single-call session to compare against"

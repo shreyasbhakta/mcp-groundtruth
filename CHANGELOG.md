@@ -19,6 +19,11 @@ All notable changes to this project are documented here. The format follows
 - JSON Lines support in the JSON adapter, with `partition_by` and `explode`;
   a directory adapter can observe the whole state directory and delegate
   nested files to other adapters.
+- Argument variants: several `[[tools]]` entries for one tool, each with a
+  `variant` label and its own verdicts; `--tool` is repeatable and accepts
+  `name[variant]`.
+- `--observe-concurrent`: observation-only concurrent attempts for tools
+  without a falsifiable idempotence claim; verdicts are unchanged.
 - Node major-version pin for targets (`node = "24"`), enforced at build and
   run time; the exact binary is recorded in provenance.
 - Reports carry each adapter's modelling decisions and notes under

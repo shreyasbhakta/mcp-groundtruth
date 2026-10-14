@@ -494,7 +494,20 @@ adapters, classification and masks as a fixture, plus:
   before it is believed or reported.
 
 Call arguments for each tool are declared in the target definition, chosen
-against the seeded state so that each call does real work.
+against the seeded state so that each call does real work. A tool may have
+several argument sets, each a `[[tools]]` entry with a distinct `variant`
+label (reported as `tool[variant]`); every variant gets the full battery and
+its own verdicts. Variants probe edge cases (existing names, missing
+references, duplicates within one call) without changing what any verdict
+means.
+
+`--observe-concurrent` also runs concurrent attempts for tools with no
+falsifiable idempotence claim. This is observation only: the verdict is
+still decided by the declaration (for example `NOT_APPLICABLE /
+PERMISSIVE_DECLARATION`), and the attempts are attached as observed behavior,
+marked "observation only". It exists to strengthen over-declaration findings,
+for instance a tool declared `idempotentHint: false` that never diverges
+under concurrent calls.
 
 ## Related work
 

@@ -191,13 +191,15 @@ constraint. Sequential calls look idempotent. Concurrent calls both insert.
 | `mcpgt verify-reset <fixture> [--json]` | Reset twice and confirm identical normalized state. |
 | `mcpgt run <fixture> [--tool NAME] [--runs N] [--concurrent-attempts N] [--runs-dir DIR]` | Run the test battery, write a JSON report, print a summary. |
 | `mcpgt prepare <target>` | Fetch and build an audit target's pinned source (the only networked step). |
-| `mcpgt run <target> --audit` | Audit a third-party server: no expected verdicts, sandboxed, always exits 0. |
+| `mcpgt run <target> --audit [--observe-concurrent]` | Audit a third-party server: no expected verdicts, sandboxed, always exits 0. `--observe-concurrent` adds observation-only concurrent attempts for tools without a falsifiable idempotence claim. |
 | `mcpgt report <run-id> [--format text\|json] [--runs-dir DIR]` | Show a saved report. |
 | `mcpgt --version` | Print the version. |
 
 `<fixture>` / `<target>` is a directory name under `fixtures/` or `targets/`,
 or a path to one. `--runs` defaults to and may not be below 3.
-`--concurrent-attempts` (per mode) defaults to 20.
+`--concurrent-attempts` (per mode) defaults to 20. `--tool` is repeatable and
+takes a tool name (all its argument variants) or one variant as
+`name[variant]`.
 
 | Exit code | Meaning |
 |---|---|

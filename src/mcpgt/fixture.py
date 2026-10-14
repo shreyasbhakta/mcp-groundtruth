@@ -125,6 +125,12 @@ class ToolSpec:
     name: str
     arguments: Mapping[str, Any]
     expected: Mapping[TestKind, Expectation]
+    variant: str | None = None  # distinguishes several argument sets for one tool
+
+    @property
+    def key(self) -> str:
+        """Unique within a definition: the tool name, plus the variant if any."""
+        return self.name if self.variant is None else f"{self.name}[{self.variant}]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,8 +289,8 @@ def load(name_or_path: str | Path) -> Fixture:
                 raise FixtureError(f"{inner.label!r} is inside {outer.label!r}, which is not a directory adapter")
 
     tools = tuple(_tool(t, is_target) for t in _list(data.get("tools", []), "tools"))
-    if len({t.name for t in tools}) != len(tools):
-        raise FixtureError("duplicate tool entries")
+    if len({t.key for t in tools}) != len(tools):
+        raise FixtureError("duplicate tool entries: give each argument set of one tool a distinct variant")
 
     env = meta.get("env", {})
     if not isinstance(env, Mapping) or not all(isinstance(v, str) for v in env.values()):
@@ -411,7 +417,7 @@ def _tool(data: Any, is_target: bool) -> ToolSpec:
             f"{where} {data.get('name')!r}: audit targets must never carry expected verdicts; "
             "only fixtures have ground truth"
         )
-    _keys(data, where, required={"name"}, optional={"arguments", "expected"})
+    _keys(data, where, required={"name"}, optional={"arguments", "expected", "variant", "notes"})
     expected: dict[TestKind, Expectation] = {}
     raw_expected = data.get("expected", {})
     if not isinstance(raw_expected, Mapping):
@@ -425,7 +431,15 @@ def _tool(data: Any, is_target: bool) -> ToolSpec:
     arguments = data.get("arguments", {})
     if not isinstance(arguments, Mapping):
         raise FixtureError(f"{where}.arguments must be a table")
-    return ToolSpec(name=_str(data["name"], f"{where}.name"), arguments=dict(arguments), expected=expected)
+    variant = None if "variant" not in data else _str(data["variant"], f"{where}.variant")
+    if variant is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", variant):
+        raise FixtureError(f"{where}.variant must be lowercase letters, digits and hyphens")
+    return ToolSpec(
+        name=_str(data["name"], f"{where}.name"),
+        arguments=dict(arguments),
+        expected=expected,
+        variant=variant,
+    )
 
 
 _FLAGS = ("business_changed", "append_only_changed", "errored_with_side_effects")

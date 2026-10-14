@@ -59,12 +59,75 @@ name = "create_entities"
 arguments = { entities = [{ name = "Carol", entityType = "person", observations = ["Joined in 2026"] }] }
 
 [[tools]]
+name = "create_entities"
+variant = "existing-name-other-type"
+notes = "Alice already exists as a person; same name, different entityType."
+arguments = { entities = [{ name = "Alice", entityType = "robot", observations = ["Speaks French"] }] }
+
+[[tools]]
+name = "create_entities"
+variant = "existing-name-new-observations"
+notes = "Bob already exists; the call repeats his type and adds an observation he does not have."
+arguments = { entities = [{ name = "Bob", entityType = "person", observations = ["Plays chess", "Owns a boat"] }] }
+
+[[tools]]
+name = "create_entities"
+variant = "duplicate-in-batch"
+notes = "Two new entities with the same name and different types in one call."
+arguments = { entities = [
+    { name = "Dana", entityType = "person", observations = ["First"] },
+    { name = "Dana", entityType = "robot", observations = ["Second"] },
+] }
+
+[[tools]]
 name = "create_relations"
 arguments = { relations = [{ from = "Bob", to = "Acme Corp", relationType = "works_at" }] }
 
 [[tools]]
+name = "create_relations"
+variant = "missing-endpoint"
+notes = "The target entity Zed does not exist."
+arguments = { relations = [{ from = "Alice", to = "Zed", relationType = "knows" }] }
+
+[[tools]]
+name = "create_relations"
+variant = "partial-invalid-batch"
+notes = "One valid new relation and one whose endpoint does not exist, in one call."
+arguments = { relations = [
+    { from = "Bob", to = "Acme Corp", relationType = "works_at" },
+    { from = "Bob", to = "Nowhere", relationType = "visits" },
+] }
+
+[[tools]]
+name = "create_relations"
+variant = "new-and-existing"
+notes = "One relation that already exists and one new one."
+arguments = { relations = [
+    { from = "Alice", to = "Acme Corp", relationType = "works_at" },
+    { from = "Paris", to = "Alice", relationType = "home_of" },
+] }
+
+[[tools]]
 name = "add_observations"
 arguments = { observations = [{ entityName = "Bob", contents = ["Plays piano"] }] }
+
+[[tools]]
+name = "add_observations"
+variant = "new-and-existing"
+notes = "One observation Alice already has and one she does not."
+arguments = { observations = [{ entityName = "Alice", contents = ["Speaks French", "Plays violin"] }] }
+
+[[tools]]
+name = "add_observations"
+variant = "missing-entity"
+notes = "The entity Zed does not exist."
+arguments = { observations = [{ entityName = "Zed", contents = ["Unknown"] }] }
+
+[[tools]]
+name = "add_observations"
+variant = "duplicate-in-call"
+notes = "The same new observation twice in one call."
+arguments = { observations = [{ entityName = "Bob", contents = ["Owns a boat", "Owns a boat"] }] }
 
 [[tools]]
 name = "delete_entities"

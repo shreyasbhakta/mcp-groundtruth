@@ -39,13 +39,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="audit mode: no expected verdicts, full report, exit 0 whatever the verdicts (required for targets)",
     )
-    run.add_argument("--tool", help="only this tool")
+    run.add_argument(
+        "--tool",
+        action="append",
+        help="only this tool (all its variants), or one variant as NAME[VARIANT]; repeatable",
+    )
     run.add_argument("--runs", type=int, default=MIN_RUNS, help=f"independent runs per test (min {MIN_RUNS})")
     run.add_argument(
         "--concurrent-attempts",
         type=int,
         default=CONCURRENT_ATTEMPTS,
         help=f"concurrent attempts per mode (default {CONCURRENT_ATTEMPTS})",
+    )
+    run.add_argument(
+        "--observe-concurrent",
+        action="store_true",
+        help="also run concurrent attempts for tools without a falsifiable idempotence claim (observation only)",
     )
     run.add_argument("--runs-dir", type=Path, default=reports.RUNS_DIR, help="where reports are written")
 
@@ -125,8 +134,9 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
                     fx,
                     Path(tmp),
                     runs=args.runs,
-                    only_tool=args.tool,
+                    only_tools=args.tool,
                     concurrent_attempts=args.concurrent_attempts,
+                    observe_concurrent=args.observe_concurrent,
                 )
             )
     except (ValueError, SourceError, IsolationUnavailable) as exc:
