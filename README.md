@@ -298,14 +298,20 @@ seeded state. This prevents a typo from silently changing what is compared.
 ## Auditing third-party servers
 
 *Unreleased: on `main`, not in 0.1.0.* Audit targets live in `targets/`.
-Each pins a repository commit, builds it locally, and runs it in a sandbox
-with no network access (macOS also confines file writes to the state
-directory). Targets never carry expected verdicts; audit reports are
-measurements for review. `targets/memory` pins the reference memory server
+Each pins a repository commit and a Node major version, builds it locally,
+and runs it in a sandbox with no network access. Targets never carry
+expected verdicts; audit reports are measurements for review.
+
+| Platform | Network | File writes | Notes |
+|---|---|---|---|
+| macOS | denied (`sandbox-exec`) | confined to the state directory | full isolation |
+| Linux | denied (`unshare --net`) | **not confined** | needs unprivileged user namespaces |
+| Linux without user namespaces | — | — | audits refuse to run; sandbox tests are skipped in CI | `targets/memory` pins the reference memory server
 from `modelcontextprotocol/servers`. See
 [docs/methodology.md](docs/methodology.md#audit-targets).
 
 ```bash
+export PATH="/path/to/node-v24/bin:$PATH"   # the target pins Node 24
 uv run mcpgt prepare memory          # fetch the pinned commit and build it
 uv run mcpgt verify-reset memory     # prove the seeded state resets exactly
 uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
@@ -341,6 +347,8 @@ uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
 - Observation covers SQLite databases, directory trees and JSON document
   files. State held only in process memory, or anywhere else undeclared,
   makes coverage partial.
+- On Linux, audit isolation blocks network but does not confine file
+  writes; see [Auditing third-party servers](#auditing-third-party-servers).
 - Concurrent overlap for two-instance attempts uses a timing heuristic:
   both calls in flight for longer than the instances' ping round-trip times
   combined. Overlap on a single connection is never assumed.

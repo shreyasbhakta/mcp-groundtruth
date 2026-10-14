@@ -28,7 +28,7 @@ from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec
 from mcpgt.normalize import NormalizationError
 from mcpgt.sandbox import Isolation, isolated, isolation
 from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, StateCategory, diff
-from mcpgt.sources import PreparedSource
+from mcpgt.sources import NodeRuntime, PreparedSource, node_runtime
 from mcpgt.sources import verify as verify_source
 from mcpgt.verdict import (
     CONCURRENT_ATTEMPTS,
@@ -167,22 +167,27 @@ class Launch:
     cwd: Path
     isolation: Isolation | None
     source: PreparedSource | None
+    node: NodeRuntime | None = None
 
 
 def launch_for(fixture: Fixture, state_dir: Path) -> Launch:
     """Resolve the server command. For targets, first verify the pinned source
     (SourceError) and the sandbox (IsolationUnavailable): a target never runs
     from an unverified checkout or with network access."""
-    source = verify_source(fixture.source) if fixture.source is not None else None
+    node = None if fixture.node is None else node_runtime(fixture.node)
+    source = verify_source(fixture.source, node_major=fixture.node) if fixture.source is not None else None
     source_path = None if source is None else source.path
     command = fixture.server_command(source_path)
+    if node is not None:
+        # Run exactly the Node binary whose version was checked.
+        command = [node.path if part == "node" else part for part in command]
     env = {**server_env(state_dir), **fixture.server_env(state_dir, source_path)}
     if not fixture.isolated:
-        return Launch(tuple(command), env, fixture.root, None, source)
+        return Launch(tuple(command), env, fixture.root, None, source, node)
     iso = isolation()
     # Targets run with the state directory as working directory, so relative
     # writes land in observed state rather than in the target definition.
-    return Launch(tuple(isolated(command, state_dir)), env, state_dir.resolve(), iso, source)
+    return Launch(tuple(isolated(command, state_dir)), env, state_dir.resolve(), iso, source, node)
 
 
 async def start_server(

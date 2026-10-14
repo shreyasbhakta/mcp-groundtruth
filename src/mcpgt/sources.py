@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -74,6 +75,31 @@ def _git(checkout: Path, *args: str) -> str:
     return proc.stdout
 
 
+@dataclass(frozen=True, slots=True)
+class NodeRuntime:
+    path: str
+    version: str  # e.g. "v24.21.0"
+
+    @property
+    def major(self) -> str:
+        return self.version.lstrip("v").split(".", 1)[0]
+
+
+def node_runtime(required_major: str) -> NodeRuntime:
+    """The ``node`` first on PATH, which must be the required major version."""
+    exe = shutil.which("node", path=os.environ.get("PATH"))
+    if exe is None:
+        raise SourceError(f"Node {required_major} required, but no node on PATH")
+    version = subprocess.run([exe, "--version"], capture_output=True, text=True, check=False).stdout.strip()
+    runtime = NodeRuntime(str(Path(exe).resolve()), version)
+    if runtime.major != required_major:
+        raise SourceError(
+            f"Node {required_major} required, but {exe} is {version or 'unknown'}; "
+            f"put Node {required_major} first on PATH"
+        )
+    return runtime
+
+
 def _toolchain() -> dict[str, str]:
     versions: dict[str, str] = {}
     for tool in ("node", "npm"):
@@ -84,8 +110,12 @@ def _toolchain() -> dict[str, str]:
     return versions
 
 
-def prepare(spec: SourceSpec, base: Path = SOURCES_DIR, log: Any = print) -> PreparedSource:
+def prepare(
+    spec: SourceSpec, base: Path = SOURCES_DIR, log: Any = print, node_major: str | None = None
+) -> PreparedSource:
     """Fetch the pinned commit and build it. Uses the network."""
+    if node_major is not None:
+        node_runtime(node_major)  # build only under the pinned Node major
     checkout = checkout_dir(spec, base)
     if not (checkout / ".git").is_dir():
         checkout.mkdir(parents=True, exist_ok=True)
@@ -106,10 +136,10 @@ def prepare(spec: SourceSpec, base: Path = SOURCES_DIR, log: Any = print) -> Pre
         )
         + "\n"
     )
-    return verify(spec, base)
+    return verify(spec, base, node_major)
 
 
-def verify(spec: SourceSpec, base: Path = SOURCES_DIR) -> PreparedSource:
+def verify(spec: SourceSpec, base: Path = SOURCES_DIR, node_major: str | None = None) -> PreparedSource:
     """Offline check that the prepared checkout is exactly what the spec pins."""
     checkout = checkout_dir(spec, base)
     if not (checkout / ".git").is_dir():
@@ -126,6 +156,11 @@ def verify(spec: SourceSpec, base: Path = SOURCES_DIR) -> PreparedSource:
         raise SourceError("source fetched but not built: run `mcpgt prepare`") from exc
     if marker.get("commit") != spec.commit or marker.get("build_digest") != spec.build_digest:
         raise SourceError("build commands changed since the source was prepared: run `mcpgt prepare`")
+    if node_major is not None and str(marker.get("node", "")).lstrip("v").split(".", 1)[0] != node_major:
+        raise SourceError(
+            f"source was built with Node {marker.get('node', 'unknown')}, target pins Node {node_major}: "
+            "run `mcpgt prepare` under that version"
+        )
     files: list[Path] = []
     for artifact in spec.artifacts:
         path = checkout / artifact

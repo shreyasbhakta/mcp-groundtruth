@@ -130,7 +130,11 @@ identifying fields, and the list leaves the parent record. Without it,
 appending to a nested list overwrites the parent record, which the
 destructive test would count as destruction. With it, an append is an
 addition and a deletion is a removal; the list's order is no longer state.
-Like masks, this is a declared modeling decision, never inferred.
+Like masks, this is a declared modeling decision, never inferred. Every
+adapter's modelling decisions (format, partitioning, explode, classification,
+masks, exclusions) and its free-text `notes` explaining them are copied into
+each report under `definition.adapters`, so anyone reading a result can see
+what was decided and why.
 
 An `fs` adapter may observe the whole state directory (`label = "."`).
 Files inside it that another adapter observes are delegated to that adapter
@@ -459,14 +463,29 @@ adapters, classification and masks as a fixture, plus:
   commit, that no tracked file is modified, and that it was built with the
   commands now in the definition. The server is always started from that
   checkout, never fetched from a package registry at run time.
+- **A pinned runtime.** A target may pin a Node major version
+  (`node = "24"`). `mcpgt prepare` refuses to build, and `mcpgt run` refuses
+  to start, under any other major version; a checkout built under a
+  different major is treated as stale. The `node` in the command is resolved
+  to the exact binary that was checked, and its path and version are
+  recorded in the report.
 - **A sandbox.** Targets always run without network access. On macOS,
   `sandbox-exec` denies all network operations and all file writes outside
-  the state directory; on Linux, `unshare --net --map-root-user` gives the
-  server a network namespace with only loopback (file writes not confined).
-  If no mechanism works, the audit refuses to run. With write confinement
-  and an `fs` adapter on the whole state directory, every file the server
-  can persist is observed by construction; state held only in process
-  memory dies with the process.
+  the state directory. If no mechanism works, the audit refuses to run.
+  With write confinement and an `fs` adapter on the whole state directory,
+  every file the server can persist is observed by construction: a lock or
+  temp file left behind appears as an unclassified change in that adapter,
+  never silently ignored. State held only in process memory dies with the
+  process.
+- **Isolation is weaker on Linux.** There, `unshare --net --map-root-user`
+  gives the server a network namespace with only loopback, so network is
+  blocked, but **file writes are not confined to the state directory**. A
+  server could write somewhere unobserved without the harness noticing.
+  Hosts that forbid unprivileged user namespaces (including the Ubuntu 24.04
+  GitHub Actions runners) have no mechanism at all, so audits refuse to run
+  there and the sandbox tests are skipped in CI. Anyone reproducing an audit
+  on Linux should account for this; the report records which mechanism was
+  used and whether writes were confined.
 - **Audit mode.** `mcpgt run <target> --audit` writes the full report and
   exits 0 whatever the verdicts. Reports record `mode: "audit"`, the
   repository and commit, the package name and version, a digest of the built

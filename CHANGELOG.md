@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format follows
 - JSON Lines support in the JSON adapter, with `partition_by` and `explode`;
   a directory adapter can observe the whole state directory and delegate
   nested files to other adapters.
+- Node major-version pin for targets (`node = "24"`), enforced at build and
+  run time; the exact binary is recorded in provenance.
+- Reports carry each adapter's modelling decisions and notes under
+  `definition.adapters`.
 - `targets/memory`: the reference memory server pinned at
   `modelcontextprotocol/servers@bbb701e`.
 

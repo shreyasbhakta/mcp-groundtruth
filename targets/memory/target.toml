@@ -9,6 +9,8 @@
 name = "memory"
 description = "Knowledge-graph memory server (TypeScript), modelcontextprotocol/servers src/memory."
 command = ["node", "{source}/src/memory/dist/index.js"]
+# Build and run only under Node 24 LTS; mcpgt refuses any other major version.
+node = "24"
 # The graph file lives inside the sandboxed state directory.
 env = { MEMORY_FILE_PATH = "{state}/memory.jsonl" }
 
@@ -39,10 +41,15 @@ format = "jsonl"
 label = "memory.jsonl"
 seed = "seed/memory.jsonl"
 partition_by = "type"
-# Each observation is its own record keyed by entity name, so appending an
-# observation is an addition, and deleting one is a removal, rather than an
-# overwrite of the whole entity line. Observation order is not treated as state.
 explode = { observations = ["name"] }
+notes = """\
+Modelling choice: each observation is exploded into its own record keyed by \
+entity name (region entity.observations). Without it, add_observations \
+rewrites the whole entity line and the destructive test would count an \
+append as an overwrite, a false destructive VIOLATION. Consequence: the order \
+of observations within an entity is not treated as state; in a knowledge \
+graph it carries no meaning.\
+"""
 business = ["entity", "entity.observations", "relation"]
 
 # Call arguments, chosen against the seeded graph so every call does real work.

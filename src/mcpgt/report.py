@@ -57,6 +57,9 @@ def provenance(run: FixtureRun) -> CaptureProvenance:
         "mcp_python_sdk": importlib.metadata.version("mcp"),
         "isolation": None if iso is None else iso.to_json(),
     }
+    node = None if run.launch is None else run.launch.node
+    if node is not None:
+        runtime["node"] = {"path": node.path, "version": node.version, "required_major": fx.node}
     if source is not None:
         runtime["build_toolchain"] = source.toolchain
         runtime["prepared_at"] = source.prepared_at
@@ -156,6 +159,11 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
         "mode": "audit" if audit else "validation",
         "kind": fx.kind,
         "scope": _scope(run, audit),
+        "definition": {
+            "locations": list(fx.locations),
+            "adapters": [a.to_json() for a in fx.adapters],
+            "tool_arguments": {t.name: t.arguments for t in fx.tools},
+        },
         "run_count": run.runs,
         "provenance": provenance(run).to_json(),
         "reset_verification": run.reset.to_json(),

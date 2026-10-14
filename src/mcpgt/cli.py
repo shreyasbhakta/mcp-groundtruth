@@ -77,13 +77,14 @@ def _prepare(fx: fixtures.Fixture) -> int:
         print(f"error: {fx.name} has no [source] to prepare", file=sys.stderr)
         return EXIT_USAGE
     try:
-        source = prepare_source(fx.source, log=lambda line: print(line, flush=True))
+        source = prepare_source(fx.source, log=lambda line: print(line, flush=True), node_major=fx.node)
     except SourceError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     print(f"prepared {source.spec.repository} @ {source.spec.commit}")
     print(f"  package: {source.package_name} {source.package_version}")
     print(f"  artifacts sha256: {source.content_sha256}")
+    print(f"  built with: {', '.join(f'{k} {v}' for k, v in source.toolchain.items())}")
     print(f"  checkout: {source.path}")
     return EXIT_OK
 

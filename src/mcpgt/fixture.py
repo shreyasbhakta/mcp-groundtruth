@@ -64,6 +64,24 @@ class AdapterSpec:
     json_format: str = "document"  # json only: "document" or "jsonl"
     partition_by: str | None = None  # json only
     explode: Mapping[str, tuple[str, ...]] | None = None  # json only: list field -> parent id fields
+    notes: str | None = None  # why the adapter models state this way; copied into reports
+
+    def to_json(self) -> dict[str, Any]:
+        """The modelling decisions this adapter makes, as recorded in reports."""
+        data: dict[str, Any] = {
+            "surface": self.surface,
+            "seed": self.seed,
+            "business": sorted(self.classification.business),
+            "append_only": sorted(self.classification.append_only),
+            "masks": [{"region": r.region, "column": r.column, "kind": r.kind.value} for r in self.normalizer.rules],
+            "exclude": list(self.exclude),
+        }
+        if self.kind == "json":
+            data["format"] = self.json_format
+            data["partition_by"] = self.partition_by
+            data["explode"] = {k: list(v) for k, v in (self.explode or {}).items()}
+        data["notes"] = self.notes
+        return data
 
     @property
     def surface(self) -> str:
@@ -140,6 +158,7 @@ class Fixture:
     is_target: bool = False
     source: SourceSpec | None = None
     env: Mapping[str, str] | None = None
+    node: str | None = None  # required Node major version, for build and run
 
     @property
     def kind(self) -> str:
@@ -238,7 +257,15 @@ def load(name_or_path: str | Path) -> Fixture:
     )
 
     meta = data[section]
-    _keys(meta, f"[{section}]", required={"name", "command"}, optional={"description", "env"})
+    _keys(
+        meta,
+        f"[{section}]",
+        required={"name", "command"},
+        optional={"description", "env"} | ({"node"} if is_target else set()),
+    )
+    node = None if "node" not in meta else _str(meta["node"], f"[{section}].node")
+    if node is not None and not node.isdigit():
+        raise FixtureError(f'[{section}].node must be a major version such as "24"')
     state = data["state"]
     _keys(state, "[state]", required={"locations"})
 
@@ -278,6 +305,7 @@ def load(name_or_path: str | Path) -> Fixture:
         is_target=is_target,
         source=source,
         env=dict(env),
+        node=node,
     )
 
 
@@ -311,7 +339,17 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
         data,
         where,
         required={"kind", "label"},
-        optional={"seed", "exclude", "business", "append_only", "mask", "format", "partition_by", "explode"},
+        optional={
+            "seed",
+            "exclude",
+            "business",
+            "append_only",
+            "mask",
+            "format",
+            "partition_by",
+            "explode",
+            "notes",
+        },
     )
     kind = _str(data["kind"], f"{where}.kind")
     if kind not in ADAPTERS:
@@ -362,6 +400,7 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
         json_format=json_format,
         partition_by=None if "partition_by" not in data else _str(data["partition_by"], f"{where}.partition_by"),
         explode=explode or None,
+        notes=None if "notes" not in data else _str(data["notes"], f"{where}.notes"),
     )
 
 

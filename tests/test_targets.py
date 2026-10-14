@@ -256,3 +256,87 @@ def test_audit_exits_zero_and_reports_without_expectations(liar_target, tmp_path
 def test_cli_prepare_needs_a_source(capsys):
     assert main(["prepare", str(FIXTURES / "honest-readonly")]) == 2
     assert "no [source]" in capsys.readouterr().err
+
+
+# --- Node runtime pin -------------------------------------------------------------
+
+
+def fake_node(tmp_path, version):
+    bin_dir = tmp_path / f"bin-{version}"
+    bin_dir.mkdir()
+    exe = bin_dir / "node"
+    exe.write_text(f"#!/bin/sh\necho {version}\n")
+    exe.chmod(0o755)
+    return bin_dir
+
+
+def test_node_runtime_must_match_the_pinned_major(tmp_path, monkeypatch):
+    from mcpgt.sources import node_runtime
+
+    monkeypatch.setenv("PATH", str(fake_node(tmp_path, "v25.6.1")))
+    with pytest.raises(SourceError, match="Node 24 required"):
+        node_runtime("24")
+    monkeypatch.setenv("PATH", str(fake_node(tmp_path, "v24.21.0")))
+    runtime = node_runtime("24")
+    assert runtime.version == "v24.21.0" and runtime.major == "24"
+
+
+def test_source_built_under_another_node_major_is_stale(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    spec = spec_for(repo, commit)
+    monkeypatch.setenv("PATH", f"{fake_node(tmp_path, 'v25.6.1')}:/usr/bin:/bin")
+    prepare(spec, base=tmp_path / "cache", log=lambda _: None)  # no pin: builds under 25
+    with pytest.raises(SourceError, match=r"built with Node v25\.6\.1, target pins Node 24"):
+        verify(spec, base=tmp_path / "cache", node_major="24")
+    with pytest.raises(SourceError, match="Node 24 required"):
+        prepare(spec, base=tmp_path / "cache", log=lambda _: None, node_major="24")
+
+
+@pytest.mark.parametrize("value", ['"lts"', '"24.1"'])
+def test_node_pin_is_a_major_version(tmp_path, value):
+    text = TARGET.replace('name = "t"', f'name = "t"\nnode = {value}')
+    with pytest.raises(fixtures.FixtureError, match="major version"):
+        fixtures.load(write_target(tmp_path / "t", text))
+
+
+def test_fixtures_cannot_pin_node(tmp_path):
+    root = tmp_path / "fx"
+    shutil.copytree(FIXTURES / "honest-readonly", root)
+    text = (root / "fixture.toml").read_text().replace('name = "honest-readonly"', 'name = "x"\nnode = "24"')
+    (root / "fixture.toml").write_text(text)
+    with pytest.raises(fixtures.FixtureError, match="unknown keys"):
+        fixtures.load(root)
+
+
+# --- Leftover lock files surface as unclassified state ------------------------------
+
+
+def test_leftover_lock_files_are_unclassified_changes(tmp_path):
+    from mcpgt.runner import deltas, observe, reset
+    from mcpgt.snapshot import StateCategory
+
+    root = write_target(tmp_path / "t")
+    (root / "graph.jsonl").write_text('{"type":"entity","name":"A","observations":["x"]}\n')
+    text = (
+        (root / "target.toml")
+        .read_text()
+        .replace('label = "graph.jsonl"', 'label = "graph.jsonl"\nseed = "graph.jsonl"')
+    )
+    (root / "target.toml").write_text(text)
+    fx = fixtures.load(root)
+    state = tmp_path / "state"
+    reset(fx, state)
+    before = observe(fx, state)
+    (state / "graph.jsonl.lock").write_text('{"pid":1}')
+    (state / "graph.jsonl.lock.break").write_text("")
+    (fs_delta, json_delta) = deltas(fx, before, observe(fx, state))
+    assert json_delta.regions == ()
+    unclassified = {r.region for r in fs_delta.in_category(StateCategory.UNCLASSIFIED)}
+    assert unclassified == {"graph.jsonl.lock", "graph.jsonl.lock.break"}
+
+
+def test_reports_record_adapter_modelling_notes():
+    fx = fixtures.load(Path(__file__).parent.parent / "targets" / "memory")
+    (_, graph) = (a.to_json() for a in fx.adapters)
+    assert graph["explode"] == {"observations": ["name"]}
+    assert "Modelling choice" in graph["notes"]
