@@ -496,6 +496,63 @@ adapters, classification and masks as a fixture, plus:
 Call arguments for each tool are declared in the target definition, chosen
 against the seeded state so that each call does real work.
 
+## Related work
+
+Other work also executes MCP tools or studies duplicate side effects. The
+descriptions below follow each project's own documentation as checked on
+2026-10-13.
+
+- **junhecui/mcp-conformance** [1] sets out to execute MCP tools under
+  observation and compare declared annotations with observed behavior. Its
+  design observes at the kernel boundary: an overlayfs upper layer as the
+  filesystem changeset, a network namespace as the connection log, and
+  seccomp denials as attempted escapes. It also plans a census pipeline that
+  measures annotation presence without execution, treats
+  `destructiveHint` as semantic rather than mechanically verifiable, and has
+  `unverifiable` as a first-class verdict. Its README describes its status as
+  "Pre-implementation. No code yet."
+- **studiomeyer-io/mcp-hook-conformance** [2] is a CLI that audits MCP
+  servers for being called from agent lifecycle hooks. It checks idempotency
+  by comparing a tool's output across identical calls, and checks that
+  read-only tools do not mutate state through a configured state probe: a
+  call to another tool on the same server. Without a probe that check
+  returns `INDETERMINATE`. It also has latency, determinism and
+  documentation suites.
+- **Li, "Where Does Exactly-Once Live?"** [3] benchmarks duplicate side
+  effects in LLM agents across model, agent harness and tool contract, in a
+  deterministic sandbox of six services with injected faults, and measures
+  how idempotency keys change the duplicate rate. It studies agent behavior
+  around writes rather than whether a tool's annotations are accurate.
+
+How this project differs, stated without any claim of priority:
+
+- **Idempotence is judged on final backing state**, from two independent
+  runs from a clean reset (once against twice), not on tool output.
+- **Observation is record-aware** for databases and structured stores (SQLite
+  rows, JSON and JSONL documents), and separates business, append-only and
+  unclassified state, so an audit row per call does not make an upsert look
+  non-idempotent.
+- **Concurrency is tested**, including two server instances sharing one
+  store, with per-attempt overlap evidence.
+- **Control sessions and reset verification** separate a tool's effects from
+  server startup and shutdown and from an unreliable reset.
+- **Contracts are parsed strictly at the wire level**, with the documented
+  divergence from how the MCP Python SDK reads the same bytes.
+
+What the junhecui/mcp-conformance design covers that this project does not:
+**network observation**, so `openWorldHint` can be tested (it is not tested
+here), and **filesystem coverage without per-server configuration**, where
+this project needs adapters, classification and masks declared for each
+server.
+
+1. J. Cui. *mcp-conformance: MCP Annotation Conformance Harness.*
+   <https://github.com/junhecui/mcp-conformance> (accessed 2026-10-13)
+2. StudioMeyer. *mcp-hook-conformance.*
+   <https://github.com/studiomeyer-io/mcp-hook-conformance> (accessed 2026-10-13)
+3. J. Li. *Where Does Exactly-Once Live? Model, Harness, and Tool-Contract
+   Effects on Duplicate Side Effects in LLM Agents.* arXiv:2609.29095, 2026.
+   <https://arxiv.org/abs/2609.29095>
+
 ## Planned, not yet implemented
 
 - **Reader divergence, recorded per server** (for the later audit of real

@@ -32,6 +32,7 @@ what it does.
 - [Design guarantees](#design-guarantees)
 - [Limitations](#limitations)
 - [Development](#development)
+- [Related work](#related-work)
 - [References](#references)
 - [License](#license)
 
@@ -391,6 +392,57 @@ CI runs lint, strict type checking and the full suite on Python 3.11 and
 
 ---
 
+## Related work
+
+Other work also executes MCP tools or studies duplicate side effects. The
+descriptions below follow each project's own documentation as checked on
+2026-10-13.
+
+- **junhecui/mcp-conformance** [5] sets out to execute MCP tools under
+  observation and compare declared annotations with observed behavior. Its
+  design observes at the kernel boundary: an overlayfs upper layer as the
+  filesystem changeset, a network namespace as the connection log, and
+  seccomp denials as attempted escapes. It also plans a census pipeline that
+  measures annotation presence without execution, treats
+  `destructiveHint` as semantic rather than mechanically verifiable, and has
+  `unverifiable` as a first-class verdict. Its README describes its status as
+  "Pre-implementation. No code yet."
+- **studiomeyer-io/mcp-hook-conformance** [6] is a CLI that audits MCP
+  servers for being called from agent lifecycle hooks. It checks idempotency
+  by comparing a tool's output across identical calls, and checks that
+  read-only tools do not mutate state through a configured state probe: a
+  call to another tool on the same server. Without a probe that check
+  returns `INDETERMINATE`. It also has latency, determinism and
+  documentation suites.
+- **Li, "Where Does Exactly-Once Live?"** [7] benchmarks duplicate side
+  effects in LLM agents across model, agent harness and tool contract, in a
+  deterministic sandbox of six services with injected faults, and measures
+  how idempotency keys change the duplicate rate. It studies agent behavior
+  around writes rather than whether a tool's annotations are accurate.
+
+How this project differs, stated without any claim of priority:
+
+- **Idempotence is judged on final backing state**, from two independent
+  runs from a clean reset (once against twice), not on tool output.
+- **Observation is record-aware** for databases and structured stores (SQLite
+  rows, JSON and JSONL documents), and separates business, append-only and
+  unclassified state, so an audit row per call does not make an upsert look
+  non-idempotent.
+- **Concurrency is tested**, including two server instances sharing one
+  store, with per-attempt overlap evidence.
+- **Control sessions and reset verification** separate a tool's effects from
+  server startup and shutdown and from an unreliable reset.
+- **Contracts are parsed strictly at the wire level**, with the documented
+  divergence from how the MCP Python SDK reads the same bytes.
+
+What the junhecui/mcp-conformance design covers that this project does not:
+**network observation**, so `openWorldHint` can be tested (it is not tested
+here), and **filesystem coverage without per-server configuration**, where
+this project needs adapters, classification and masks declared for each
+server.
+
+---
+
 ## References
 
 1. Model Context Protocol. *Specification, version 2025-11-25: Tools*
@@ -404,10 +456,19 @@ CI runs lint, strict type checking and the full suite on Python 3.11 and
    <https://arxiv.org/abs/2609.10962>
 4. Model Context Protocol Python SDK, version 2.3.0 (MIT License).
    <https://github.com/modelcontextprotocol/python-sdk>
+5. J. Cui. *mcp-conformance: MCP Annotation Conformance Harness.* GitHub
+   repository, accessed 2026-10-13.
+   <https://github.com/junhecui/mcp-conformance>
+6. StudioMeyer. *mcp-hook-conformance.* GitHub repository (MIT License),
+   accessed 2026-10-13.
+   <https://github.com/studiomeyer-io/mcp-hook-conformance>
+7. J. Li. *Where Does Exactly-Once Live? Model, Harness, and Tool-Contract
+   Effects on Duplicate Side Effects in LLM Agents.* arXiv:2609.29095, 2026.
+   <https://arxiv.org/abs/2609.29095>
 
-References 2 and 3 study what MCP servers declare and expose. This project
-is complementary: it executes tools to check declarations against behavior.
-It does not reproduce or restate their findings.
+References 2 and 3 study what MCP servers declare and expose; this project
+does not reproduce or restate their findings. Work that also executes tools
+is discussed under [Related work](#related-work).
 
 ---
 
