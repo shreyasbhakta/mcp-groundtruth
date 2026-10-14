@@ -60,8 +60,10 @@ class PreparedSource:
 
 
 def checkout_dir(spec: SourceSpec, base: Path = SOURCES_DIR) -> Path:
+    """One checkout per (repository, commit, build commands): two targets that
+    pin the same commit but build different packages never share a build."""
     slug = re.sub(r"[^A-Za-z0-9]+", "-", spec.repository.removesuffix(".git")).strip("-")[-60:]
-    return (base / slug / spec.commit).resolve()
+    return (base / slug / f"{spec.commit}-build-{spec.build_digest[:12]}").resolve()
 
 
 def _marker(checkout: Path) -> Path:
@@ -143,6 +145,8 @@ def verify(spec: SourceSpec, base: Path = SOURCES_DIR, node_major: str | None = 
     """Offline check that the prepared checkout is exactly what the spec pins."""
     checkout = checkout_dir(spec, base)
     if not (checkout / ".git").is_dir():
+        if any(checkout.parent.glob(f"{spec.commit}-build-*/.git")):
+            raise SourceError("build commands changed since the source was prepared: run `mcpgt prepare`")
         raise SourceError(f"source not prepared: run `mcpgt prepare` (expected {checkout})")
     head = _git(checkout, "rev-parse", "HEAD").strip()
     if head != spec.commit:

@@ -59,6 +59,35 @@ def test_symlinks_are_recorded_not_followed(tmp_path):
     assert region.records == ((("text", "link"), ("text", "symlink"), ("text", "real")),)
 
 
+def test_tree_ignores_timestamps_so_reads_and_identical_rewrites_are_not_changes(tmp_path):
+    root = tmp_path / "files"
+    root.mkdir()
+    (root / "a.txt").write_text("x")
+    before = fs(root)
+    (root / "a.txt").read_text()  # updates atime on most filesystems
+    os.utime(root / "a.txt", (1, 2))  # atime and mtime both changed
+    (root / "a.txt").write_text("x")  # identical content rewritten: new mtime
+    assert fs(root) == before
+
+
+def test_permission_bits_are_state_only_when_asked(tmp_path):
+    root = tmp_path / "files"
+    (root / "d").mkdir(parents=True)
+    (root / "d" / "a.txt").write_text("x")
+    (root / "d" / "a.txt").chmod(0o644)
+    (root / "link").symlink_to("d/a.txt")
+    plain, moded = FilesystemAdapter(root, "files"), FilesystemAdapter(root, "files", modes=True)
+    before_plain, before = plain.snapshot(), moded.snapshot()
+    assert before.region("d").columns == ("path", "kind", "content", "mode")
+    assert ("text", "0o644") in [r[3] for r in before.region("d").records]
+    assert before.region("link").records[0][3] == ("null", None)
+    assert "permission bits" in moded.coverage().covered
+    (root / "d" / "a.txt").chmod(0o600)
+    assert plain.snapshot() == before_plain
+    (changed,) = diff(before, moded.snapshot(), Classification(frozenset({"d"}), frozenset())).regions
+    assert changed.differing_columns() == ("mode",)
+
+
 def test_excluded_tree_entries_are_uncovered(tmp_path):
     root = tree(tmp_path / "t", {"docs/a": "A", "cache/c": "C"})
     adapter = FilesystemAdapter(root, "files", exclude=["cache"])

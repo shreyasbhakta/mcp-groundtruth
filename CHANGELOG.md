@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `fs` adapters: `modes = true` records permission bits as state, and
+  `empty_dirs` creates empty directories after the seed is copied (git
+  cannot store them).
+
+### Changed
+
+- Prepared sources are checked out per commit *and* build commands, so two
+  targets pinning one commit but building different packages never share a
+  build. Existing checkouts must be prepared again.
+
 ## [0.2.0] - 2026-10-14
 
 Audits real servers, and makes it practical to test your own. Adds audit

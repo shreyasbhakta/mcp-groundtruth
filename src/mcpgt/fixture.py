@@ -67,6 +67,8 @@ class AdapterSpec:
     partition_by: str | None = None  # json only
     explode: Mapping[str, tuple[str, ...]] | None = None  # json only: list field -> parent id fields
     notes: str | None = None  # why the adapter models state this way; copied into reports
+    modes: bool = False  # fs only: permission bits are state too
+    empty_dirs: tuple[str, ...] = ()  # fs only: created empty after the seed is copied (git keeps no empty dirs)
 
     def to_json(self) -> dict[str, Any]:
         """The modelling decisions this adapter makes, as recorded in reports."""
@@ -82,6 +84,9 @@ class AdapterSpec:
             data["format"] = self.json_format
             data["partition_by"] = self.partition_by
             data["explode"] = {k: list(v) for k, v in (self.explode or {}).items()}
+        if self.kind == "fs":
+            data["modes"] = self.modes
+            data["empty_dirs"] = list(self.empty_dirs)
         data["notes"] = self.notes
         return data
 
@@ -96,7 +101,7 @@ class AdapterSpec:
     def build(self, state_dir: Path, delegated: Mapping[str, str] | None = None) -> SnapshotAdapter:
         path = state_dir / self.label
         if self.kind == "fs":
-            return FilesystemAdapter(path, self.label, self.exclude, delegated)
+            return FilesystemAdapter(path, self.label, self.exclude, delegated, modes=self.modes)
         if self.kind == "json":
             return JsonStoreAdapter(
                 path,
@@ -387,6 +392,8 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
             "partition_by",
             "explode",
             "notes",
+            "modes",
+            "empty_dirs",
         },
     )
     kind = _str(data["kind"], f"{where}.kind")
@@ -394,6 +401,15 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
         raise FixtureError(f"{where}: unsupported adapter kind {kind!r} (one of {', '.join(ADAPTERS)})")
     if kind != "json" and {"format", "partition_by", "explode"} & data.keys():
         raise FixtureError(f"{where}: format, partition_by and explode apply to json adapters only")
+    if kind != "fs" and {"modes", "empty_dirs"} & data.keys():
+        raise FixtureError(f"{where}: modes and empty_dirs apply to fs adapters only")
+    modes = data.get("modes", False)
+    if not isinstance(modes, bool):
+        raise FixtureError(f"{where}.modes must be a boolean")
+    empty_dirs = tuple(_strs(data.get("empty_dirs", []), f"{where}.empty_dirs"))
+    for d in empty_dirs:
+        if not d or Path(d).is_absolute() or ".." in Path(d).parts:
+            raise FixtureError(f"{where}.empty_dirs: {d!r} must be a relative path inside the adapter's directory")
     label = _str(data["label"], f"{where}.label")
     if Path(label).is_absolute() or ".." in Path(label).parts or label == "":
         raise FixtureError(f"{where}: label must be a relative path inside the state directory")
@@ -439,6 +455,8 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
         partition_by=None if "partition_by" not in data else _str(data["partition_by"], f"{where}.partition_by"),
         explode=explode or None,
         notes=None if "notes" not in data else _str(data["notes"], f"{where}.notes"),
+        modes=modes,
+        empty_dirs=empty_dirs,
     )
 
 

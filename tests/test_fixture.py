@@ -134,3 +134,57 @@ def test_cli_verify_reset(capsys, copy):
     edit(copy, "('b', '2');", "('b', '2'), ('r', hex(randomblob(8)));", file="seed.sql")
     assert main(["verify-reset", str(copy)]) == 1
     assert main(["verify-reset", "no-such-fixture"]) == 2
+
+
+FS_TARGET = """
+[fixture]
+name = "fs"
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["fs:."]
+
+[[adapters]]
+kind = "fs"
+label = "."
+seed = "seed"
+modes = true
+empty_dirs = ["root/empty", "root/a/b"]
+business = ["root"]
+"""
+
+
+def test_fs_adapters_create_declared_empty_directories_on_reset(tmp_path):
+    root = tmp_path / "fx"
+    (root / "seed" / "root").mkdir(parents=True)
+    (root / "seed" / "root" / "f.txt").write_text("x")
+    (root / "fixture.toml").write_text(FS_TARGET)
+    (root / "server.py").write_text("")
+    fx = fixtures.load(root)
+    (spec,) = fx.adapters
+    assert spec.modes and spec.empty_dirs == ("root/empty", "root/a/b")
+    assert spec.to_json()["empty_dirs"] == ["root/empty", "root/a/b"]
+    result = verify_reset(fx, tmp_path / "state")
+    assert result.status is ResetStatus.VERIFIED
+    assert sorted(p.name for p in (tmp_path / "state" / "root" / "empty").iterdir()) == []
+    assert (tmp_path / "state" / "root" / "a" / "b").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('empty_dirs = ["root/empty", "root/a/b"]', 'empty_dirs = ["../out"]', "relative path inside"),
+        ("modes = true", 'modes = "yes"', "modes must be a boolean"),
+        ('kind = "fs"\nlabel = "."', 'kind = "json"\nlabel = "x.json"', "apply to fs adapters only"),
+    ],
+)
+def test_fs_only_options_are_validated(tmp_path, old, new, message):
+    root = tmp_path / "fx"
+    (root / "seed").mkdir(parents=True)
+    text = FS_TARGET.replace('locations = ["fs:."]', 'locations = ["fs:.", "json:x.json"]')
+    assert old in text
+    (root / "fixture.toml").write_text(
+        text.replace(old, new).replace('seed = "seed"\n', "" if "json" in new else 'seed = "seed"\n')
+    )
+    with pytest.raises(fixtures.FixtureError, match=message):
+        fixtures.load(root)

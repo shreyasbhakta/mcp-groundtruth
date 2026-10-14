@@ -68,6 +68,8 @@ def reset(fixture: Fixture, state_dir: Path) -> None:
                     target.mkdir(parents=True, exist_ok=True)
                 else:
                     shutil.copytree(seed, target, symlinks=True, dirs_exist_ok=True)
+                for empty in spec.empty_dirs:
+                    (target / empty).mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if spec.kind == "sqlite":

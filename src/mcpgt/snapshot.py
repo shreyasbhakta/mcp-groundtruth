@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -214,6 +215,7 @@ def _record_json(record: Record) -> list[list[Any]]:
 # --- Filesystem tree ---------------------------------------------------------
 
 FS_COLUMNS = ("path", "kind", "content")
+FS_MODE_COLUMNS = (*FS_COLUMNS, "mode")
 
 
 class FilesystemAdapter(SnapshotAdapter):
@@ -222,8 +224,11 @@ class FilesystemAdapter(SnapshotAdapter):
     Each region is one top-level entry of the tree (a file, or a directory
     and everything beneath it). Records are (relative path, kind, content):
     the SHA-256 of a file's bytes, a symlink's target, or empty for a
-    directory. Symlinks are recorded, never followed. Modification times,
-    permissions and ownership are not treated as state.
+    directory. Symlinks are recorded, never followed. With ``modes``, each
+    record also carries the permission bits (``0o644``; null for symlinks).
+    Timestamps (modification, access, change, birth) and ownership are never
+    treated as state: reading a file updates its access time, and rewriting
+    identical content updates its modification time.
 
     ``delegated`` maps relative paths inside the tree to the surface of
     another adapter that observes them (e.g. a JSONL file inside the
@@ -236,11 +241,13 @@ class FilesystemAdapter(SnapshotAdapter):
         label: str,
         exclude: Iterable[str] = (),
         delegated: Mapping[str, str] | None = None,
+        modes: bool = False,
     ) -> None:
         self.root = Path(root)
         self.surface = f"fs:{label}"
         self.exclude = frozenset(exclude)
         self.delegated = dict(delegated or {})
+        self.modes = modes
 
     def coverage(self) -> Coverage:
         return Coverage(
@@ -248,6 +255,7 @@ class FilesystemAdapter(SnapshotAdapter):
             covered=(
                 "paths, kinds and content hashes of every entry not excluded",
                 "symlink targets",
+                *(("permission bits",) if self.modes else ()),
                 *(f"{path}: observed by {surface}" for path, surface in sorted(self.delegated.items())),
             ),
             uncovered=tuple(f"entry {name} (excluded)" for name in sorted(self.exclude)),
@@ -265,7 +273,7 @@ class FilesystemAdapter(SnapshotAdapter):
                     region = rel.split("/", 1)[0]
                     if region in self.exclude or rel in self.delegated:
                         continue
-                    records.setdefault(region, []).append(_fs_record(path, rel))
+                    records.setdefault(region, []).append(_fs_record(path, rel, self.modes))
                 dirnames[:] = [
                     d
                     for d in dirnames
@@ -276,18 +284,25 @@ class FilesystemAdapter(SnapshotAdapter):
             raise SnapshotError(f"{self.surface}: read failed: {exc}") from exc
         return Snapshot(
             surface=self.surface,
-            regions=tuple(Region(name, FS_COLUMNS, tuple(rs)) for name, rs in records.items()),
+            regions=tuple(
+                Region(name, FS_MODE_COLUMNS if self.modes else FS_COLUMNS, tuple(rs)) for name, rs in records.items()
+            ),
         )
 
 
-def _fs_record(path: Path, rel: str) -> Record:
+def _fs_record(path: Path, rel: str, modes: bool = False) -> Record:
     if path.is_symlink():
         kind, content = "symlink", os.readlink(path)
     elif path.is_dir():
         kind, content = "dir", ""
     else:
         kind, content = "file", hashlib.sha256(path.read_bytes()).hexdigest()
-    return (("text", rel), ("text", kind), ("text", content))
+    record: Record = (("text", rel), ("text", kind), ("text", content))
+    if modes:
+        # A symlink's own permission bits carry no meaning on most systems.
+        mode = None if kind == "symlink" else oct(stat.S_IMODE(path.lstat().st_mode))
+        record += (("null", None) if mode is None else ("text", mode),)
+    return record
 
 
 # --- JSON document store --------------------------------------------------------

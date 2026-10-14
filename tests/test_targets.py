@@ -142,6 +142,18 @@ def test_prepare_then_verify(upstream, tmp_path):
     assert verify(spec, base=tmp_path / "cache").content_sha256 == prepared.content_sha256
 
 
+def test_targets_pinning_one_commit_with_different_builds_keep_separate_checkouts(upstream, tmp_path):
+    repo, commit = upstream
+    base = tmp_path / "cache"
+    first = spec_for(repo, commit)
+    second = spec_for(repo, commit, (("mkdir", "-p", "pkg/dist"), ("touch", "pkg/dist/other.js")))
+    assert checkout_dir(first, base) != checkout_dir(second, base)
+    prepare(first, base=base, log=lambda _: None)
+    prepare(second, base=base, log=lambda _: None)
+    verify(first, base=base)  # preparing the second did not invalidate the first
+    verify(second, base=base)
+
+
 def test_verify_refuses_unprepared_modified_or_rebuilt_sources(upstream, tmp_path):
     repo, commit = upstream
     base = tmp_path / "cache"

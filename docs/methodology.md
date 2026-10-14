@@ -142,10 +142,25 @@ An `fs` adapter may observe the whole state directory (`label = "."`).
 Files inside it that another adapter observes are delegated to that adapter
 rather than hashed twice, and still count as covered.
 
+An `fs` adapter records, for every entry, its path, its kind (file,
+directory or symlink) and its content: the SHA-256 of a file's bytes, which
+also fixes its size, or a symlink's target. With `modes = true` it also
+records permission bits. `empty_dirs` lists directories to create empty after
+the seed is copied, since git cannot store an empty directory.
+
 Values keep their type: `1`, `1.0`, `"1"` and `true` are distinct, and a JSON
 field that is missing differs from one that is `null`. Not treated as state:
-physical layout (SQLite rowids, page order), file modification times,
-permissions and ownership. Symlinks are recorded, never followed.
+
+- physical layout (SQLite rowids, page order);
+- file timestamps (modification, access, change and birth times);
+- ownership;
+- permission bits, unless `modes = true`.
+
+Timestamps are excluded deliberately. Reading a file updates its access time,
+and rewriting identical content updates its modification time. Neither is a
+change of what is stored, and counting either would make every read-only tool
+a VIOLATION. The cost is that a tool that only touches a timestamp is not
+seen. Symlinks are recorded, never followed.
 
 SQLite snapshots are read through a read-only connection in a single
 transaction.
