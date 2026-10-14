@@ -2,11 +2,13 @@
 
 ## Scope
 
-Release 0.1 measures **fixture servers written for this project**, each with a
-known ground truth. It makes no measurement of, and no claim about, any
-third-party MCP server or the MCP ecosystem. Its purpose is to show that the
-harness gives the expected verdict on every fixture, including the ones built
-to tempt it into overclaiming.
+The harness is validated against **fixture servers written for this
+project**, each with a known ground truth. The fixtures show that it gives
+the expected verdict on every one, including those built to tempt it into
+overclaiming. Since 0.2, it also audits other servers as
+[audit targets](#audit-targets). An audit is a measurement of one server at
+one commit, with one seeded state. It is no claim about any other server or
+about the MCP ecosystem.
 
 ## Declared contracts
 
@@ -425,7 +427,7 @@ in the report, raw, with the sessions that returned it.
 
 ## Fixtures
 
-Release 0.1 is correct when every fixture produces exactly its expected
+The harness is correct when every fixture produces exactly its expected
 verdicts, recorded in its `fixture.toml`. `mcpgt run` checks each verdict
 against its expectation and exits non-zero on any mismatch.
 

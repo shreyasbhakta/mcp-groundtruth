@@ -227,7 +227,7 @@ takes a tool name (all its argument variants) or one variant as
 
 ## Reports
 
-`mcpgt run` writes `runs/<run-id>/report.json` (schema `mcpgt.report/0.1`),
+`mcpgt run` writes `runs/<run-id>/report.json` (schema `mcpgt.report/0.2`),
 a self-contained evidence record:
 
 - **Provenance**:
@@ -321,7 +321,7 @@ changing what is compared.
 
 ## Auditing third-party servers
 
-*Unreleased: on `main`, not in 0.1.0.* Audit targets live in `targets/`.
+*Since 0.2.0.* Audit targets live in `targets/`.
 Each pins a repository commit and a Node major version, builds it locally,
 and runs it in a sandbox with no network access. Targets never carry
 expected verdicts; audit reports are measurements for review.
