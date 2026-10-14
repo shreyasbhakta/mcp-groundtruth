@@ -310,11 +310,27 @@ decide. Review them in the report.
 
 On GitHub's Ubuntu 24.04 runners, AppArmor blocks the unprivileged user
 namespaces the Linux sandbox needs. Run on macOS, or allow them on the
-(throwaway) runner before the audit step:
+runner before the audit step:
 
 ```yaml
+      # Ephemeral GitHub-hosted runners ONLY. See the warning below.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ```
+
+> [!WARNING]
+> This command **disables an Ubuntu security restriction**. The restriction
+> limits a kernel feature that is a common route for privilege escalation.
+> The setting is meant only for **ephemeral GitHub-hosted runners**, which
+> are discarded when the job ends.
+>
+> **Do not run it on developer machines, servers, or persistent self-hosted
+> runners.** There it stays in effect for every user and process until it is
+> reverted.
+>
+> Use a macOS runner instead, where the sandbox needs no system change. Or
+> audit on a disposable VM that is destroyed afterwards, where this setting
+> or the lack of isolation cannot outlive the audit. Audits refuse to run
+> without a sandbox; only `mcpgt init` has `--no-sandbox`.
 
 The Linux sandbox blocks the network but does not confine file writes.
 
@@ -334,7 +350,8 @@ mcpgt run mcpgt/my-server --audit --fail-on-violation
   and log path into `{state}`.
 - **`no network isolation available`.** On Linux, audits need unprivileged
   user namespaces. Ubuntu 24.04 restricts them by default through AppArmor.
-  macOS needs nothing extra.
+  macOS needs nothing extra. Do not lift that restriction on a machine you
+  keep; see the warning in [Gate releases in CI](#7-gate-releases-in-ci).
 - **Startup writes.** A server that writes on every start (a migration, a
   boot log) shows up in the control sessions. The concurrent two-process mode
   is then skipped, with `TWO_PROCESS_SKIPPED_STARTUP_WRITES`, rather than

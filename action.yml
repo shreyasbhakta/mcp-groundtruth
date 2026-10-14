@@ -1,3 +1,7 @@
+# Usage and inputs: docs/your-server.md, "Gate releases in CI". On Ubuntu
+# 24.04 runners the Linux sandbox needs unprivileged user namespaces; the
+# sysctl that allows them disables a security restriction and is for
+# ephemeral GitHub-hosted runners only (see the warning there).
 name: mcp-groundtruth audit
 description: Audit an MCP server's tool annotations against its observed behavior, and fail on any VIOLATION.
 author: Shreyas Bhakta

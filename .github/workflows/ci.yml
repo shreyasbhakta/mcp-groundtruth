@@ -59,6 +59,9 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v5
+      # Disables an Ubuntu security restriction. Acceptable only because
+      # GitHub-hosted runners are ephemeral; never run this on developer
+      # machines, servers or persistent self-hosted runners.
       - name: Allow unprivileged user namespaces for the Linux sandbox
         if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
