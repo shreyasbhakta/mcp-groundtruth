@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- [docs/your-server.md](docs/your-server.md): testing your own server from
+  install to report, using `examples/notes`, a small SQLite-backed server with
+  one deliberate annotation bug.
 - `mcpgt init <dir> -- <server command>`: starts a server in the audit
   sandbox, lists its tools and writes a starting `target.toml`: every tool,
   its declared hints as comments, argument placeholders from each input

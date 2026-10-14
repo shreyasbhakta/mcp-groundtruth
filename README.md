@@ -163,6 +163,8 @@ uvx --from mcp-groundtruth mcpgt --help    # or run it without installing
 uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from source, today
 ```
 
+To test your own server, follow [Test your own MCP server](docs/your-server.md),
+which walks a small example server from `mcpgt init` to a report.
 To run this repository's fixtures, use a checkout and
 [uv](https://docs.astral.sh/uv/):
 

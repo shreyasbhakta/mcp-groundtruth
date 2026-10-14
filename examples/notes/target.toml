@@ -1,0 +1,56 @@
+# The completed target from docs/your-server.md: the output of `mcpgt init`
+# with every TODO(mcpgt) answered and the generated guidance comments
+# replaced by these.
+
+[target]
+name = "notes"
+description = "notes"
+# {python} is mcpgt's own interpreter, which has the MCP SDK the server needs.
+command = ["{python}", "{target}/server.py"]
+# The server keeps its database wherever NOTES_DB says: inside {state}.
+env = {NOTES_DB = "{state}/notes.db"}
+
+[state]
+locations = ["sqlite:notes.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "notes.db"
+seed = "seed.sql"
+business = ["notes"]       # the data a user would miss
+append_only = ["activity"] # a log: rows are only ever added
+# Set from the clock on every insert, so they differ between runs.
+mask = [
+    { region = "notes", column = "created_at", kind = "timestamp" },
+    { region = "activity", column = "at", kind = "timestamp" },
+]
+
+# add_note: Add a note and return its id.
+#   declared: readOnlyHint=false destructiveHint=false idempotentHint=false openWorldHint=false
+[[tools]]
+name = "add_note"
+arguments = { title = "Shopping", body = "Bread" }
+
+# list_notes: List note titles.
+#   declared: readOnlyHint=true destructiveHint=false idempotentHint=true openWorldHint=false
+[[tools]]
+name = "list_notes"
+arguments = {}
+
+# get_note: Return a note's body.
+#   declared: readOnlyHint=true destructiveHint=false idempotentHint=true openWorldHint=false
+[[tools]]
+name = "get_note"
+arguments = { note_id = 1 }
+
+# rename_note: Set a note's title.
+#   declared: readOnlyHint=false destructiveHint=true idempotentHint=true openWorldHint=false
+[[tools]]
+name = "rename_note"
+arguments = { note_id = 1, title = "Errands" }
+
+# delete_note: Delete a note. Deleting a missing note does nothing.
+#   declared: readOnlyHint=false destructiveHint=true idempotentHint=true openWorldHint=false
+[[tools]]
+name = "delete_note"
+arguments = { note_id = 2 }
