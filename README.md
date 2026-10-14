@@ -1,5 +1,6 @@
 # mcp-groundtruth
 
+[![CI](https://github.com/shreyasbhakta/mcp-groundtruth/actions/workflows/ci.yml/badge.svg)](https://github.com/shreyasbhakta/mcp-groundtruth/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.14-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
