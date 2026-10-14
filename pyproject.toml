@@ -1,5 +1,5 @@
 [project]
-name = "mcpgt"
+name = "mcp-groundtruth"
 version = "0.1.0"
 description = "Behavioral conformance harness for Model Context Protocol tool annotations."
 readme = "README.md"
@@ -29,9 +29,11 @@ dependencies = [
 Repository = "https://github.com/shreyasbhakta/mcp-groundtruth"
 Methodology = "https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/methodology.md"
 Changelog = "https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/CHANGELOG.md"
+Issues = "https://github.com/shreyasbhakta/mcp-groundtruth/issues"
 
 [project.scripts]
 mcpgt = "mcpgt.cli:main"
+mcp-groundtruth = "mcpgt.cli:main"  # so `uvx mcp-groundtruth` works without --from
 
 [dependency-groups]
 dev = [
@@ -46,6 +48,22 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcpgt"]
+
+[tool.hatch.build.targets.sdist]
+# Source, tests and the fixtures they run; not audit results or local state.
+include = [
+    "/src",
+    "/tests",
+    "/fixtures",
+    "/targets",
+    "/examples",
+    "/docs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/NOTICE",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

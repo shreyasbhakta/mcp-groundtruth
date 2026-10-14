@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Packaged for PyPI as `mcp-groundtruth`, with the `mcpgt` command (also
+  installed as `mcp-groundtruth`, so `uvx mcp-groundtruth` works). A release
+  workflow publishes version tags through PyPI trusted publishing after the
+  full CI suite passes.
 - Audit targets (`targets/<name>/target.toml`): third-party servers with no
   expected verdicts, and `mcpgt run <target> --audit`, which writes the full
   report and exits 0 regardless of verdicts.

@@ -1,0 +1,69 @@
+name: Release
+
+# Publishes to PyPI when a version tag (v1.2.3) is pushed, using PyPI trusted
+# publishing: no API token is stored. The PyPI project must list this
+# repository, this workflow file (release.yml) and the "pypi" environment as a
+# trusted publisher.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build distributions
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - name: Tag matches the package version
+        run: |
+          version="$(uv version --short)"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${version}"
+            exit 1
+          fi
+      - run: uv build
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/mcpgt --version
+          /tmp/smoke/bin/mcp-groundtruth --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-groundtruth/
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

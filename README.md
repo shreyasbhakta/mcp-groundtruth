@@ -153,8 +153,18 @@ means no race was observed. The full rules are in
 
 ## Quick start
 
-Requirements: Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
-macOS or Linux.
+Requirements: Python 3.11 or later. macOS or Linux.
+
+Install the `mcpgt` command:
+
+```bash
+pip install mcp-groundtruth                # once published to PyPI
+uvx --from mcp-groundtruth mcpgt --help    # or run it without installing
+uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from source, today
+```
+
+To run this repository's fixtures, use a checkout and
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/shreyasbhakta/mcp-groundtruth.git
