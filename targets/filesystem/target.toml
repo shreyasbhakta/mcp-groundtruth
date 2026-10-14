@@ -1,0 +1,177 @@
+# The official filesystem server, audited from a pinned commit.
+# Started from `mcpgt init` output; every TODO(mcpgt) answered by reading
+# src/filesystem/{index,server,lib}.ts at the pinned commit.
+
+[target]
+name = "filesystem"
+description = "@modelcontextprotocol/server-filesystem at modelcontextprotocol/servers@bbb701e"
+# The only allowed directory is root/ inside the state directory, given on
+# the command line (index.ts resolveAllowedDirectories). The harness client
+# does not offer the Roots capability, so server.ts keeps these directories.
+command = ["node", "{source}/src/filesystem/dist/index.js", "{state}/root"]
+env = {}
+node = "24"
+
+[source]
+repository = "https://github.com/modelcontextprotocol/servers.git"
+commit = "bbb701e7ac1e57f3edd1c2836b94c5457eaf7b9c"
+package = "src/filesystem"
+build = [
+    ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+    ["npm", "run", "build", "--workspace", "src/filesystem"],
+]
+artifacts = ["src/filesystem/dist"]
+
+[state]
+# The whole state directory. The sandbox lets the server write nowhere else,
+# and its allowed directory (root/) is inside it.
+locations = ["fs:."]
+
+[[adapters]]
+kind = "fs"
+label = "."
+seed = "seed"
+# Git cannot store an empty directory.
+empty_dirs = ["root/empty"]
+# Everything under root/ is one region: tools create new top-level entries
+# (new.txt, projects/), which as separate regions would be unclassified.
+business = ["root"]
+append_only = []
+mask = []
+modes = true
+notes = """\
+State is, for every entry under the state directory: its path, its kind \
+(file, directory or symlink), the SHA-256 of a file's content (which fixes \
+its size), a symlink's target, and permission bits (modes = true). \
+Timestamps are not state: a read updates atime, and write_file of identical \
+content updates mtime without changing what is stored, so observing either \
+would turn reads into false read-only VIOLATIONs. A tool that changed only a \
+timestamp would therefore not be seen. Ownership and extended attributes are \
+not observed either; no tool here changes them.\
+"""
+
+# --- Tools --------------------------------------------------------------
+# Paths are relative: lib.ts validatePath resolves them against the allowed
+# directory. Arguments checked against the zod schemas in server.ts.
+
+# read_file: Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "read_file"
+arguments = { path = "notes.txt" }
+
+# read_text_file: Read the complete contents of a file from the file system as text. Handles various text encodings...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "read_text_file"
+arguments = { path = "notes.txt" }
+
+[[tools]]
+name = "read_text_file"
+variant = "head"
+arguments = { path = "notes.txt", head = 2 }
+
+[[tools]]
+name = "read_text_file"
+variant = "tail"
+arguments = { path = "notes.txt", tail = 1 }
+
+# read_media_file: Read a file and return it as a base64-encoded content block with its MIME type. Image and audio f...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "read_media_file"
+arguments = { path = "docs/logo.png" }
+
+# read_multiple_files: Read the contents of multiple files simultaneously. This is more efficient than reading files one...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "read_multiple_files"
+arguments = { paths = ["notes.txt", "docs/guide.md"] }
+
+# write_file: Create a new file or completely overwrite an existing file with new content. Use with caution as...
+#   declared: readOnlyHint=false destructiveHint=true idempotentHint=true openWorldHint=false
+[[tools]]
+name = "write_file"
+arguments = { path = "new.txt", content = "hello\n" }
+
+# Overwrites a seeded file in place (lib.ts overwriteInPlace).
+[[tools]]
+name = "write_file"
+variant = "existing"
+arguments = { path = "todo.txt", content = "- buy bread\n" }
+
+# edit_file: Make line-based edits to a text file. Each edit replaces exact line sequences with new content. R...
+#   declared: readOnlyHint=false destructiveHint=true idempotentHint=false openWorldHint=false
+[[tools]]
+name = "edit_file"
+arguments = { path = "notes.txt", edits = [{ oldText = "Status: draft", newText = "Status: final" }] }
+
+# dryRun returns the diff and writes nothing (lib.ts applyFileEdits).
+[[tools]]
+name = "edit_file"
+variant = "dry-run"
+arguments = { path = "notes.txt", edits = [{ oldText = "Status: draft", newText = "Status: final" }], dryRun = true }
+
+# create_directory: Create a new directory or ensure a directory exists. Can create multiple nested directories in on...
+#   declared: readOnlyHint=false destructiveHint=false idempotentHint=true openWorldHint=false
+[[tools]]
+name = "create_directory"
+arguments = { path = "projects/2026" }
+
+# mkdir -p on a directory that already exists.
+[[tools]]
+name = "create_directory"
+variant = "existing"
+arguments = { path = "docs" }
+
+# list_directory: Get a detailed listing of all files and directories in a specified path. Results clearly distingu...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "list_directory"
+arguments = { path = "." }
+
+[[tools]]
+name = "list_directory"
+variant = "empty"
+arguments = { path = "empty" }
+
+# list_directory_with_sizes: Get a detailed listing of all files and directories in a specified path, including sizes. Results...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "list_directory_with_sizes"
+arguments = { path = ".", sortBy = "size" }
+
+# directory_tree: Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "directory_tree"
+arguments = { path = "." }
+
+# move_file: Move or rename files and directories. Can move files between directories and rename them in a sin...
+#   declared: readOnlyHint=false destructiveHint=true idempotentHint=false openWorldHint=false
+[[tools]]
+name = "move_file"
+arguments = { source = "todo.txt", destination = "docs/todo.txt" }
+
+# search_files: Recursively search for files and directories matching a pattern. The patterns should be glob-styl...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "search_files"
+arguments = { path = ".", pattern = "**/*.md" }
+
+# get_file_info: Retrieve detailed metadata about a file or directory. Returns comprehensive information including...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "get_file_info"
+arguments = { path = "notes.txt" }
+
+[[tools]]
+name = "get_file_info"
+variant = "directory"
+arguments = { path = "docs" }
+
+# list_allowed_directories: Returns the list of directories that this server is allowed to access. Subdirectories within thes...
+#   declared: readOnlyHint=true destructiveHint=(absent) idempotentHint=(absent) openWorldHint=false
+[[tools]]
+name = "list_allowed_directories"
+arguments = {}
