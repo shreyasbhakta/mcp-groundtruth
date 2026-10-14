@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `mcpgt init <dir> -- <server command>`: starts a server in the audit
+  sandbox, lists its tools and writes a starting `target.toml`: every tool,
+  its declared hints as comments, argument placeholders from each input
+  schema, and `TODO(mcpgt)` placeholders for state locations, adapters,
+  classification and masks. A definition with any `TODO(mcpgt)` value left
+  refuses to load and lists each one.
+- `{target}` placeholder (the definition's directory) in commands and `env`;
+  `{state}` is now also expanded in commands.
 - Packaged for PyPI as `mcp-groundtruth`, with the `mcpgt` command (also
   installed as `mcp-groundtruth`, so `uvx mcp-groundtruth` works). A release
   workflow publishes version tags through PyPI trusted publishing after the

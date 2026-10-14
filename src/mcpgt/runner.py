@@ -177,7 +177,7 @@ def launch_for(fixture: Fixture, state_dir: Path) -> Launch:
     node = None if fixture.node is None else node_runtime(fixture.node)
     source = verify_source(fixture.source, node_major=fixture.node) if fixture.source is not None else None
     source_path = None if source is None else source.path
-    command = fixture.server_command(source_path)
+    command = fixture.server_command(source_path, state_dir)
     if node is not None:
         # Run exactly the Node binary whose version was checked.
         command = [node.path if part == "node" else part for part in command]

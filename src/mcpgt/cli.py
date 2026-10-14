@@ -1,4 +1,4 @@
-"""mcpgt command line: verify-reset, prepare, run, report."""
+"""mcpgt command line: init, verify-reset, prepare, run, report."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import asyncio
 import json
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
-from mcpgt import __version__
+from mcpgt import __version__, scaffold
 from mcpgt import fixture as fixtures
 from mcpgt import report as reports
 from mcpgt.runner import run_fixture, verify_reset
@@ -66,7 +67,35 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--format", choices=["text", "json"], default="text")
     rep.add_argument("--runs-dir", type=Path, default=reports.RUNS_DIR)
 
+    init = sub.add_parser(
+        "init",
+        help="start a server, list its tools and write a starting target.toml",
+        usage="mcpgt init DIR [--name NAME] [--env KEY=VALUE] [--force] [--no-sandbox] -- SERVER COMMAND...",
+    )
+    init.add_argument("dir", type=Path, help="directory for the new target (created if missing)")
+    init.add_argument("--name", help="target name (default: the directory name)")
+    init.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="environment variable for the server, kept in target.toml; may use {state}; repeatable",
+    )
+    init.add_argument("--force", action="store_true", help="overwrite an existing target.toml")
+    init.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="start the server without network isolation (when the host has none)",
+    )
+
+    argv = sys.argv[1:] if argv is None else list(argv)
+    server_command: list[str] = []
+    if argv[:1] == ["init"] and "--" in argv:
+        split = argv.index("--")
+        argv, server_command = argv[:split], argv[split + 1 :]
     args = parser.parse_args(argv)
+    if args.command == "init":
+        return _init(args, server_command)
     if args.command == "report":
         return _report(args)
     try:
@@ -79,6 +108,40 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         return _prepare(fx)
     return _run(fx, args)
+
+
+def _init(args: argparse.Namespace, server_command: list[str]) -> int:
+    if not server_command:
+        print("error: give the server command after --, e.g. mcpgt init my-target -- python server.py", file=sys.stderr)
+        return EXIT_USAGE
+    env: dict[str, str] = {}
+    for item in args.env:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            print(f"error: --env needs KEY=VALUE, got {item!r}", file=sys.stderr)
+            return EXIT_USAGE
+        env[key] = value
+    target_dir: Path = args.dir
+    if (target_dir / "target.toml").exists() and not args.force:
+        print(f"error: {target_dir / 'target.toml'} already exists (use --force to overwrite)", file=sys.stderr)
+        return EXIT_USAGE
+    command = scaffold.portable_command(server_command, target_dir)
+    try:
+        found = asyncio.run(scaffold.discover(command, target_dir, env, sandbox=not args.no_sandbox))
+        text = scaffold.render(args.name or target_dir.resolve().name, command, env, found, server_command)
+        path = scaffold.write(target_dir, text, force=args.force)
+    except IsolationUnavailable as exc:
+        print(f"error: {exc}; pass --no-sandbox to start the server without isolation", file=sys.stderr)
+        return EXIT_USAGE
+    except (scaffold.InitError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    todos = fixtures.unanswered_todos(tomllib.loads(text))
+    tools = f"{len(found.tools)} tool{'' if len(found.tools) == 1 else 's'}"
+    print(f"wrote {path}: {tools}, {len(todos)} {fixtures.TODO_MARKER} placeholders to fill in")
+    print(f"  started with: {' '.join(command)}" + (f" (sandbox: {found.isolation})" if found.isolation else ""))
+    print(f"next: edit {path}, then run: mcpgt verify-reset {target_dir}")
+    return EXIT_OK
 
 
 def _prepare(fx: fixtures.Fixture) -> int:

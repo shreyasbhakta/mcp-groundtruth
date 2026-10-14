@@ -36,7 +36,9 @@ from mcpgt.verdict import Behavior, Outcome, Reason, TestKind, parse_reason
 
 FIXTURES_DIR = Path("fixtures")
 TARGETS_DIR = Path("targets")
-_PLACEHOLDER = re.compile(r"\{(python|source|state)\}")
+_PLACEHOLDER = re.compile(r"\{(python|source|state|target)\}")
+# Marks a value `mcpgt init` could not know. A definition holding one does not load.
+TODO_MARKER = "TODO(mcpgt)"
 
 
 class FixtureError(ValueError):
@@ -184,6 +186,8 @@ class Fixture:
             key = match.group(1)
             if key == "python":
                 return sys.executable
+            if key == "target":
+                return str(self.root)
             value = state_dir if key == "state" else source
             if value is None:
                 raise FixtureError(f"{self.name}: {{{key}}} is not available here")
@@ -191,8 +195,8 @@ class Fixture:
 
         return _PLACEHOLDER.sub(sub, text)
 
-    def server_command(self, source: Path | None = None) -> list[str]:
-        return [self._expand(part, None, source) for part in self.command]
+    def server_command(self, source: Path | None = None, state_dir: Path | None = None) -> list[str]:
+        return [self._expand(part, state_dir, source) for part in self.command]
 
     def server_env(self, state_dir: Path, source: Path | None = None) -> dict[str, str]:
         return {k: self._expand(v, state_dir, source) for k, v in (self.env or {}).items()}
@@ -255,6 +259,13 @@ def load(name_or_path: str | Path) -> Fixture:
         data = tomllib.loads(file.read_text())
     except tomllib.TOMLDecodeError as exc:
         raise FixtureError(f"{file}: {exc}") from exc
+    todos = unanswered_todos(data)
+    if todos:
+        listed = "\n".join(f"  {where}: {value}" for where, value in todos)
+        raise FixtureError(
+            f"{file}: {len(todos)} unanswered {TODO_MARKER} "
+            f"{'placeholder' if len(todos) == 1 else 'placeholders'}; replace each with a real value:\n{listed}"
+        )
     _keys(
         data,
         file.name,
@@ -313,6 +324,27 @@ def load(name_or_path: str | Path) -> Fixture:
         env=dict(env),
         node=node,
     )
+
+
+def unanswered_todos(data: Any, where: str = "") -> list[tuple[str, str]]:
+    """Every string value still starting with TODO_MARKER, with its key path."""
+    if isinstance(data, str):
+        return [(where, data)] if data.startswith(TODO_MARKER) else []
+    if isinstance(data, Mapping):
+        items: list[tuple[str, Any]] = [(f"{where}.{k}" if where else str(k), v) for k, v in data.items()]
+    elif isinstance(data, list):
+        # Name array entries that have one, so a TODO is easy to find: tools[3](delete_note).
+        items = [
+            (
+                f"{where}[{i}]"
+                + (f"({v['name']})" if isinstance(v, Mapping) and isinstance(v.get("name"), str) else ""),
+                v,
+            )
+            for i, v in enumerate(data)
+        ]
+    else:
+        return []
+    return [todo for path, value in items for todo in unanswered_todos(value, path)]
 
 
 def _nested(inner: str, outer: str) -> bool:

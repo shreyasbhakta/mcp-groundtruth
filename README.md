@@ -200,6 +200,7 @@ constraint. Sequential calls look idempotent. Concurrent calls both insert.
 
 | Command | Purpose |
 |---|---|
+| `mcpgt init <dir> [--name N] [--env K=V] [--force] [--no-sandbox] -- <server command>` | Start a server, list its tools, and write a starting `target.toml` with `TODO(mcpgt)` placeholders for everything only you can decide. |
 | `mcpgt verify-reset <fixture> [--json]` | Reset twice and confirm identical normalized state. |
 | `mcpgt run <fixture> [--tool NAME] [--runs N] [--concurrent-attempts N] [--runs-dir DIR]` | Run the test battery, write a JSON report, print a summary. |
 | `mcpgt prepare <target>` | Fetch and build an audit target's pinned source (the only networked step). |
@@ -304,9 +305,14 @@ verdict = "PASS"
 append_only_changed = true
 ```
 
-The server finds its state directory in `MCPGT_STATE_DIR`. Definitions are
-parsed strictly: unknown keys are errors, and every mask rule must match the
-seeded state. This prevents a typo from silently changing what is compared.
+The server finds its state directory in `MCPGT_STATE_DIR`. Commands and
+`env` values may use `{python}` (the harness interpreter), `{state}` (the
+state directory), `{target}` (the definition's directory) and, for targets
+with a `[source]`, `{source}` (the prepared checkout). Definitions are parsed
+strictly: unknown keys are errors, every mask rule must match the seeded
+state, and any value still starting with `TODO(mcpgt)` stops the definition
+from loading. This prevents a typo or a forgotten decision from silently
+changing what is compared.
 
 ---
 
