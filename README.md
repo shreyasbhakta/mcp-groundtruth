@@ -381,19 +381,35 @@ Reports, hand review and caveats:
 
 ## Limitations
 
-- Release 0.1 tests only the fixtures in this repository. It does not test
-  real servers.
-- Tool arguments come from the fixture definition. The harness does not
-  generate inputs.
-- Observation covers SQLite databases, directory trees and JSON document
-  files. State held only in process memory, or anywhere else undeclared,
-  makes coverage partial.
+- **stdio servers only.** Streamable HTTP and other transports are not
+  supported.
+- **State in SQLite, files or JSON only.** Observation covers SQLite
+  databases, files and directory trees, and JSON or JSON Lines files.
+  State held anywhere else (process memory, another database, a remote
+  service) cannot be observed. If it is declared, coverage is partial and
+  verdicts that depend on it are INCONCLUSIVE. If it is not declared, it is
+  not seen at all. An `fs` adapter on `.` observes the whole state
+  directory, and on macOS audits block writes outside it.
+- **`mcpgt prepare` supports git sources only.** It fetches one commit,
+  named by its full 40-character SHA, of a git repository (the host must
+  allow fetching by SHA, as GitHub does). It then runs the target's build
+  commands in the checkout. Those commands run unsandboxed and with network
+  access, so review them. Only a Node major version can be pinned
+  (`node = "24"`). Package name and version are read from `package.json`
+  only. Toolchain versions are recorded only for `node` and `npm`. Servers
+  in other languages can be built with their own commands, but their
+  toolchains are neither pinned nor recorded. Targets without a `[source]`
+  run the command as given, and their provenance is the definition alone.
+- Tool arguments come from the definition. The harness does not generate
+  inputs; `mcpgt init` writes placeholders for you to fill in.
 - On Linux, audit isolation blocks network but does not confine file
   writes; see [Auditing third-party servers](#auditing-third-party-servers).
 - Concurrent overlap for two-instance attempts uses a timing heuristic:
   both calls in flight for longer than the instances' ping round-trip times
   combined. Overlap on a single connection is never assumed.
-- The concurrent behavior of undeclared tools is out of scope.
+- Concurrent verdicts are given only for tools declaring
+  `idempotentHint: true`. `--observe-concurrent` records concurrent attempts
+  for the others, without changing their verdicts.
 - `openWorldHint` is reported but not tested.
 
 ---
