@@ -147,7 +147,7 @@ Each verdict has one primary reason and may list secondary reasons, so a
 `CALL_ERROR` stays visible under `NO_DECLARATION`. The concurrent test is
 one-sided. A single diverging attempt is a conclusive VIOLATION. A PASS only
 means no race was observed. The full rules are in
-[docs/methodology.md](docs/methodology.md).
+[docs/methodology.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/methodology.md).
 
 ---
 
@@ -163,7 +163,7 @@ uvx --from mcp-groundtruth mcpgt --help    # or run it without installing
 uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from source, today
 ```
 
-To test your own server, follow [Test your own MCP server](docs/your-server.md),
+To test your own server, follow [Test your own MCP server](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/your-server.md),
 which walks a small example server from `mcpgt init` to a report and shows
 how to gate CI on it with this repository's GitHub Action.
 To run this repository's fixtures, use a checkout and
@@ -332,7 +332,7 @@ expected verdicts; audit reports are measurements for review.
 | Linux | denied (`unshare --net`) | **not confined** | needs unprivileged user namespaces |
 | Linux without user namespaces | — | — | audits refuse to run; sandbox tests are skipped in CI | `targets/memory` pins the reference memory server
 from `modelcontextprotocol/servers`. See
-[docs/methodology.md](docs/methodology.md#audit-targets).
+[docs/methodology.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/methodology.md#audit-targets).
 
 ```bash
 export PATH="/path/to/node-v24/bin:$PATH"   # the target pins Node 24
@@ -356,7 +356,7 @@ other servers or other versions of this one.
   with identical arguments changed nothing in any of 12 argument sets tested.
 
 Reports, hand review and caveats:
-[results/memory-2026-10-14/REVIEW.md](results/memory-2026-10-14/REVIEW.md).
+[results/memory-2026-10-14/REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/memory-2026-10-14/REVIEW.md).
 
 ---
 
@@ -530,4 +530,4 @@ is discussed under [Related work](#related-work).
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0. See [LICENSE](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/LICENSE) and [NOTICE](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/NOTICE).
