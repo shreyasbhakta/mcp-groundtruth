@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format follows
 
 - Report schema `mcpgt.report/0.2`: adds `mode`, `kind`, and provenance
   `definition` and `runtime`.
+- Provenance records the Node binary's path relative to the working
+  directory (for example `.mcpgt/toolchains/...`), or as `~/...` under the
+  home directory, so published reports do not reveal the local directory
+  layout.
 
 ## [0.1.0] - 2026-10-13
 

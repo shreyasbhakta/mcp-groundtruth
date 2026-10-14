@@ -1,7 +1,8 @@
 import json
 import subprocess
+from pathlib import Path
 
-from mcpgt.provenance import CaptureProvenance, SourceProvenance, git_state, tree_sha256
+from mcpgt.provenance import CaptureProvenance, SourceProvenance, git_state, portable_path, tree_sha256
 
 
 def test_tree_digest_ignores_listing_order_and_tracks_content(tmp_path):
@@ -45,3 +46,17 @@ def test_capture_provenance_serializes():
     data = json.loads(json.dumps(cap.to_json()))
     assert data["server"]["git_sha"] == "a" * 40
     assert data["initialize_response"] == '{"jsonrpc":"2.0"}'
+
+
+def test_portable_path_hides_the_machine_layout(tmp_path, monkeypatch):
+    repo, home = tmp_path / "home" / "someone" / "repo", tmp_path / "home" / "someone"
+    node = repo / ".mcpgt" / "toolchains" / "node-v24" / "bin" / "node"
+    node.parent.mkdir(parents=True)
+    node.touch()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert portable_path(node, base=repo) == ".mcpgt/toolchains/node-v24/bin/node"
+    monkeypatch.chdir(repo)
+    assert portable_path(str(node)) == ".mcpgt/toolchains/node-v24/bin/node"  # default base: working directory
+    other = home / "elsewhere" / "node"
+    assert portable_path(other, base=repo) == "~/elsewhere/node"
+    assert portable_path("/usr/bin/env", base=repo) == "/usr/bin/env"  # system locations stay as they are

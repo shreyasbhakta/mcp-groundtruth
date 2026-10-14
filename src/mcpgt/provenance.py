@@ -83,3 +83,20 @@ def tree_sha256(root: Path, files: Iterable[Path]) -> str:
         content = (root / rel).read_bytes()
         digest.update(rel.encode() + b"\0" + hashlib.sha256(content).digest())
     return digest.hexdigest()
+
+
+def portable_path(path: str | Path, base: Path | None = None) -> str:
+    """A path for a published report, without the machine's directory layout.
+
+    Relative to ``base`` (default: the working directory, which holds
+    ``.mcpgt/``) when inside it, ``~/...`` when inside the home directory,
+    otherwise unchanged (system locations such as ``/usr/bin/node``).
+    """
+    p = Path(path).resolve()
+    for root, prefix in ((Path.cwd() if base is None else base, ""), (Path.home(), "~/")):
+        try:
+            rel = p.relative_to(root.resolve())
+        except ValueError:
+            continue
+        return prefix + rel.as_posix()
+    return p.as_posix()

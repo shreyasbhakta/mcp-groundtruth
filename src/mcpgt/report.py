@@ -17,7 +17,15 @@ from typing import Any
 
 import mcpgt
 from mcpgt.fixture import Expectation, Fixture
-from mcpgt.provenance import CaptureProvenance, SourceProvenance, git_state, now_utc, python_version, tree_sha256
+from mcpgt.provenance import (
+    CaptureProvenance,
+    SourceProvenance,
+    git_state,
+    now_utc,
+    portable_path,
+    python_version,
+    tree_sha256,
+)
 from mcpgt.runner import FixtureRun
 from mcpgt.snapshot import StateCategory
 from mcpgt.verdict import IMPLEMENTED, Outcome, Reason, Verdict, coherence
@@ -59,7 +67,7 @@ def provenance(run: FixtureRun) -> CaptureProvenance:
     }
     node = None if run.launch is None else run.launch.node
     if node is not None:
-        runtime["node"] = {"path": node.path, "version": node.version, "required_major": fx.node}
+        runtime["node"] = {"path": portable_path(node.path), "version": node.version, "required_major": fx.node}
     if source is not None:
         runtime["build_toolchain"] = source.toolchain
         runtime["prepared_at"] = source.prepared_at

@@ -1,6 +1,7 @@
 """A full run of honest-idempotent through runner, verdicts and report."""
 
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from mcpgt import fixture as fixtures
 from mcpgt import report as reports
 from mcpgt.cli import main
 from mcpgt.runner import run_fixture
+from mcpgt.sources import NodeRuntime
 from mcpgt.verdict import Outcome, TestKind, derive
 
 FX = fixtures.load(Path(__file__).parent.parent / "fixtures" / "honest-idempotent")
@@ -70,6 +72,16 @@ def test_report_carries_raw_listing_and_provenance(first):
     assert prov["definition"]["source"] == "fixtures/honest-idempotent"
     assert len(prov["server"]["content_sha256"]) == 64
     assert '"serverInfo"' in prov["initialize_response"]
+
+
+def test_report_records_node_path_relative_to_the_working_directory(first, tmp_path, monkeypatch):
+    run, _, _ = first
+    node = tmp_path / ".mcpgt" / "toolchains" / "node-v24.21.0-darwin-arm64" / "bin" / "node"
+    launch = dataclasses.replace(run.launch, node=NodeRuntime(str(node), "v24.21.0"))
+    monkeypatch.chdir(tmp_path)
+    prov = reports.provenance(dataclasses.replace(run, launch=launch)).to_json()
+    assert prov["runtime"]["node"]["path"] == ".mcpgt/toolchains/node-v24.21.0-darwin-arm64/bin/node"
+    assert str(tmp_path) not in json.dumps(prov)
 
 
 def test_tool_responses_are_kept_verbatim(first):
