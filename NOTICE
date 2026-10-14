@@ -1,0 +1,10 @@
+mcp-groundtruth
+Copyright 2026 The mcp-groundtruth contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It contains no third-party source code. At run time it depends on the
+following separately licensed package, which is not redistributed here:
+
+  mcp (Model Context Protocol Python SDK), MIT License
+  https://github.com/modelcontextprotocol/python-sdk

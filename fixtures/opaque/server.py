@@ -41,7 +41,7 @@ def record(event: str) -> str:
 )
 def peek(event: str) -> str:
     """Report whether `event` was recorded."""
-    seen = JOURNAL.exists() and any(json.loads(l).get("event") == event for l in JOURNAL.open())
+    seen = JOURNAL.exists() and any(json.loads(line).get("event") == event for line in JOURNAL.open())
     append({"peeked": event})
     return "yes" if seen else "no"
 

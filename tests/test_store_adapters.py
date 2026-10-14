@@ -1,0 +1,179 @@
+"""Filesystem-tree and JSON document store adapters, and seeding them."""
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from mcpgt import fixture as fixtures
+from mcpgt.normalize import MaskRule, Normalizer, VolatileKind
+from mcpgt.runner import ResetStatus, reset, verify_reset
+from mcpgt.snapshot import Classification, FilesystemAdapter, JsonStoreAdapter, SnapshotError, StateCategory, diff
+
+# --- Filesystem tree ----------------------------------------------------------
+
+
+def tree(root: Path, files: dict[str, str]) -> Path:
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return root
+
+
+def fs(root):
+    return FilesystemAdapter(root, "files").snapshot()
+
+
+def test_tree_regions_are_top_level_entries(tmp_path):
+    root = tree(tmp_path / "t", {"docs/a.txt": "A", "docs/sub/b.txt": "B", "log.txt": "L"})
+    snap = fs(root)
+    assert [r.name for r in snap.regions] == ["docs", "log.txt"]
+    paths = [rec[0][1] for rec in snap.region("docs").records]
+    assert paths == ["docs", "docs/a.txt", "docs/sub", "docs/sub/b.txt"]
+
+
+def test_tree_snapshot_ignores_creation_order_and_mtime(tmp_path):
+    a = tree(tmp_path / "a", {"x/1": "one", "x/2": "two"})
+    b = tree(tmp_path / "b", {"x/2": "two", "x/1": "one"})
+    os.utime(b / "x" / "1", (0, 0))
+    assert fs(a) == fs(b)
+
+
+def test_tree_detects_content_change_rename_and_delete(tmp_path):
+    root = tree(tmp_path / "t", {"docs/a.txt": "A"})
+    before = fs(root)
+    classes = Classification(business=frozenset({"docs"}), append_only=frozenset())
+    (root / "docs" / "a.txt").write_text("changed")
+    (changed,) = diff(before, fs(root), classes).regions
+    assert changed.differing_columns() == ("content",)
+    (root / "docs" / "a.txt").rename(root / "docs" / "b.txt")
+    assert diff(before, fs(root), classes).removed_any(StateCategory.BUSINESS)
+
+
+def test_symlinks_are_recorded_not_followed(tmp_path):
+    root = tree(tmp_path / "t", {"real/f": "x"})
+    (root / "link").symlink_to("real")
+    region = fs(root).region("link")
+    assert region.records == ((("text", "link"), ("text", "symlink"), ("text", "real")),)
+
+
+def test_excluded_tree_entries_are_uncovered(tmp_path):
+    root = tree(tmp_path / "t", {"docs/a": "A", "cache/c": "C"})
+    adapter = FilesystemAdapter(root, "files", exclude=["cache"])
+    assert adapter.snapshot().region("cache") is None
+    assert not adapter.coverage().complete
+
+
+def test_missing_tree_is_a_snapshot_error(tmp_path):
+    with pytest.raises(SnapshotError):
+        fs(tmp_path / "nope")
+
+
+# --- JSON document store ------------------------------------------------------
+
+
+def store(tmp_path, data, name="store.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps(data))
+    return JsonStoreAdapter(path, "store").snapshot()
+
+
+def test_list_collection_columns_are_the_union_of_fields(tmp_path):
+    snap = store(tmp_path, {"users": [{"id": 1, "name": "a"}, {"id": 2, "email": "b@x"}]})
+    users = snap.region("users")
+    assert users.columns == ("email", "id", "name")
+    assert (("absent", None), ("integer", 1), ("text", "a")) in users.records
+
+
+def test_absent_field_differs_from_null(tmp_path):
+    absent = store(tmp_path, {"c": [{"a": 1}]}, "a.json")
+    null = store(tmp_path, {"c": [{"a": 1, "b": None}]}, "b.json")
+    assert absent != null
+
+
+@pytest.mark.parametrize("left, right", [(1, 1.0), (1, True), (1, "1"), (0, False), ([1], "[1]")])
+def test_json_types_are_part_of_the_value(tmp_path, left, right):
+    assert store(tmp_path, {"c": [{"v": left}]}, "l.json") != store(tmp_path, {"c": [{"v": right}]}, "r.json")
+
+
+def test_mapping_collection_keeps_document_ids(tmp_path):
+    snap = store(tmp_path, {"orders": {"o1": {"total": 5}, "o2": {"total": 7}}})
+    orders = snap.region("orders")
+    assert orders.columns == ("_key", "total")
+    assert orders.records == ((("text", "o1"), ("integer", 5)), (("text", "o2"), ("integer", 7)))
+
+
+def test_nested_values_compare_as_canonical_json(tmp_path):
+    a = store(tmp_path, {"c": [{"v": {"y": 1, "x": 2}}]}, "a.json")
+    b = store(tmp_path, {"c": [{"v": {"x": 2, "y": 1}}]}, "b.json")
+    assert a == b
+
+
+def test_json_fields_can_be_masked(tmp_path):
+    a = store(tmp_path, {"events": [{"kind": "x", "at": "t1"}]}, "a.json")
+    b = store(tmp_path, {"events": [{"kind": "x", "at": "t2"}]}, "b.json")
+    norm = Normalizer.of([MaskRule("events", "at", VolatileKind.TIMESTAMP)])
+    assert a != b and norm.equivalent(a, b)
+
+
+@pytest.mark.parametrize("content", ["not json", "[1, 2]"])
+def test_unreadable_store_is_a_snapshot_error(tmp_path, content):
+    (tmp_path / "s.json").write_text(content)
+    with pytest.raises(SnapshotError):
+        JsonStoreAdapter(tmp_path / "s.json", "s").snapshot()
+
+
+# --- Seeding and reset verification for non-SQLite surfaces ---------------------
+
+
+def make_fixture(root: Path, *, fs_seed: bool = True) -> Path:
+    tree(root / "seed_tree", {"docs/readme.txt": "hello"})
+    (root / "seed_store.json").write_text(json.dumps({"items": [{"k": "a", "v": 1}]}))
+    seed_line = 'seed = "seed_tree"\n' if fs_seed else ""
+    (root / "fixture.toml").write_text(
+        f"""
+[fixture]
+name = "stores"
+command = ["{{python}}", "-c", "pass"]
+
+[state]
+locations = ["fs:files", "json:store.json"]
+
+[[adapters]]
+kind = "fs"
+label = "files"
+{seed_line}business = ["docs"]
+
+[[adapters]]
+kind = "json"
+label = "store.json"
+seed = "seed_store.json"
+business = ["items"]
+"""
+    )
+    return root
+
+
+def test_fs_and_json_surfaces_reset_and_verify(tmp_path):
+    fx = fixtures.load(make_fixture(tmp_path / "fx"))
+    result = verify_reset(fx, tmp_path / "state")
+    assert result.status is ResetStatus.VERIFIED
+    assert result.coverage.complete
+    reset(fx, tmp_path / "state")
+    assert (tmp_path / "state" / "files" / "docs" / "readme.txt").read_text() == "hello"
+
+
+def test_unseeded_fs_surface_starts_empty(tmp_path):
+    fx = fixtures.load(make_fixture(tmp_path / "fx", fs_seed=False))
+    reset(fx, tmp_path / "state")
+    assert list((tmp_path / "state" / "files").iterdir()) == []
+
+
+def test_fs_seed_must_be_a_directory(tmp_path):
+    root = make_fixture(tmp_path / "fx")
+    text = (root / "fixture.toml").read_text().replace('seed = "seed_tree"', 'seed = "seed_store.json"')
+    (root / "fixture.toml").write_text(text)
+    with pytest.raises(fixtures.FixtureError, match="seed directory"):
+        fixtures.load(root)

@@ -17,8 +17,7 @@ def set_flag(name: str, value: str) -> str:
     """Set flag `name` to `value`."""
     with contextlib.closing(sqlite3.connect(DB)) as conn, conn:
         conn.execute(
-            "INSERT INTO flags (name, value) VALUES (?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            "INSERT INTO flags (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             (name, value),
         )
     return "ok"

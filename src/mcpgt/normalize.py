@@ -67,10 +67,7 @@ class Normalizer:
             name=region.name,
             columns=region.columns,
             records=tuple(
-                tuple(
-                    ("masked", masks[i].value) if i in masks else cell
-                    for i, cell in enumerate(record)
-                )
+                tuple(("masked", masks[i].value) if i in masks else cell for i, cell in enumerate(record))
                 for record in region.records
             ),
         )
@@ -85,8 +82,7 @@ class Normalizer:
             region = seeded.region(rule.region)
             if region is None:
                 raise NormalizationError(
-                    f"mask rule for {rule.region}.{rule.column}: no region "
-                    f"{rule.region!r} on {seeded.surface}"
+                    f"mask rule for {rule.region}.{rule.column}: no region {rule.region!r} on {seeded.surface}"
                 )
         self.apply(seeded)  # raises on unknown columns
 

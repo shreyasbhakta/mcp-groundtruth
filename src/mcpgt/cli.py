@@ -9,16 +9,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+from mcpgt import __version__
 from mcpgt import fixture as fixtures
 from mcpgt import report as reports
-from mcpgt.runner import ResetStatus, run_fixture, verify_reset
-from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, derive
+from mcpgt.runner import run_fixture, verify_reset
+from mcpgt.verdict import CONCURRENT_ATTEMPTS, MIN_RUNS, ResetStatus, derive
 
 EXIT_OK, EXIT_UNEXPECTED, EXIT_USAGE = 0, 1, 2
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="mcpgt")
+    parser = argparse.ArgumentParser(
+        prog="mcpgt", description="Behavioral conformance harness for MCP tool annotations."
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     vr = sub.add_parser("verify-reset", help="reset twice and confirm identical normalized state")

@@ -20,19 +20,23 @@ ROOT = Path(__file__).parent.parent / "fixtures"
 
 
 def test_all_fixtures_present():
-    assert FIXTURES == sorted(
-        [
-            "honest-readonly",
-            "honest-idempotent",
-            "liar-idempotent",
-            "liar-concurrent",
-            "liar-readonly",
-            "silent-safe",
-            "opaque",
-            "flaky",
-            "malformed-hints",
-            "liar-readonly-error",
-        ]
+    assert (
+        sorted(
+            [
+                "honest-readonly",
+                "honest-idempotent",
+                "liar-idempotent",
+                "liar-concurrent",
+                "liar-readonly",
+                "silent-safe",
+                "opaque",
+                "flaky",
+                "malformed-hints",
+                "liar-readonly-error",
+                "startup-writer",
+            ]
+        )
+        == FIXTURES
     )
 
 

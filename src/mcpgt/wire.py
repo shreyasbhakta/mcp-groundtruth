@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mcpgt import __version__
+
 PROTOCOL_VERSION = "2025-11-25"
-CLIENT_INFO = {"name": "mcpgt", "version": "0.1.0.dev0"}
+CLIENT_INFO = {"name": "mcpgt", "version": __version__}
 MAX_LINE_BYTES = 16 * 1024 * 1024
 MAX_LIST_PAGES = 1000
 
@@ -125,7 +127,7 @@ class WireClient:
         try:
             await self._send(message)
             return await asyncio.wait_for(future, self._timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise WireError(f"{method}: no response within {self._timeout}s") from exc
         finally:
             self._pending.pop(request_id, None)
@@ -200,7 +202,7 @@ class WireClient:
                 await stdin.wait_closed()
         try:
             await asyncio.wait_for(self._process.wait(), self._timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._process.kill()
             await self._process.wait()
         for task in (self._reader, self._stderr_reader):

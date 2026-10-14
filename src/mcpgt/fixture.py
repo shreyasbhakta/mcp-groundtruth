@@ -10,12 +10,20 @@ from __future__ import annotations
 import sys
 import tomllib
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mcpgt.normalize import MaskRule, Normalizer, VolatileKind
-from mcpgt.snapshot import Classification, Coverage, SnapshotAdapter, SQLiteAdapter
+from mcpgt.snapshot import (
+    Classification,
+    Coverage,
+    FilesystemAdapter,
+    JsonStoreAdapter,
+    SnapshotAdapter,
+    SQLiteAdapter,
+)
 from mcpgt.verdict import Behavior, Outcome, Reason, TestKind, parse_reason
 
 FIXTURES_DIR = Path("fixtures")
@@ -23,6 +31,15 @@ FIXTURES_DIR = Path("fixtures")
 
 class FixtureError(ValueError):
     """The fixture definition is invalid."""
+
+
+# kind -> adapter; the adapter observes state_dir/<label>. Seeds: a SQL script
+# (sqlite), a directory copied as the tree (fs), a JSON file copied (json).
+ADAPTERS: dict[str, type[SQLiteAdapter] | type[FilesystemAdapter] | type[JsonStoreAdapter]] = {
+    "sqlite": SQLiteAdapter,
+    "fs": FilesystemAdapter,
+    "json": JsonStoreAdapter,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +56,7 @@ class AdapterSpec:
         return f"{self.kind}:{self.label}"
 
     def build(self, state_dir: Path) -> SnapshotAdapter:
-        return SQLiteAdapter(state_dir / self.label, label=self.label, exclude=self.exclude)
+        return ADAPTERS[self.kind](state_dir / self.label, self.label, self.exclude)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,9 +126,7 @@ class Fixture:
         )
 
     def source_files(self) -> list[Path]:
-        return sorted(
-            p for p in self.root.rglob("*") if p.is_file() and "__pycache__" not in p.parts
-        )
+        return sorted(p for p in self.root.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
 
 
 def resolve(name_or_path: str | Path) -> Path:
@@ -169,11 +184,16 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
         required={"kind", "label"},
         optional={"seed", "exclude", "business", "append_only", "mask"},
     )
-    if data["kind"] != "sqlite":
-        raise FixtureError(f"{where}: unsupported adapter kind {data['kind']!r}")
+    kind = _str(data["kind"], f"{where}.kind")
+    if kind not in ADAPTERS:
+        raise FixtureError(f"{where}: unsupported adapter kind {kind!r} (one of {', '.join(ADAPTERS)})")
     seed = data.get("seed")
-    if seed is not None and not (root / _str(seed, f"{where}.seed")).is_file():
-        raise FixtureError(f"{where}: seed file {seed!r} not found")
+    if seed is not None:
+        seed_path = root / _str(seed, f"{where}.seed")
+        if kind == "fs" and not seed_path.is_dir():
+            raise FixtureError(f"{where}: seed directory {seed!r} not found")
+        if kind != "fs" and not seed_path.is_file():
+            raise FixtureError(f"{where}: seed file {seed!r} not found")
     try:
         classification = Classification(
             business=frozenset(_strs(data.get("business", []), f"{where}.business")),
@@ -185,12 +205,12 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
     for rule in _list(data.get("mask", []), f"{where}.mask"):
         _keys(rule, f"{where}.mask", required={"region", "column", "kind"})
         try:
-            kind = VolatileKind(rule["kind"])
+            volatile = VolatileKind(rule["kind"])
         except ValueError as exc:
             raise FixtureError(f"{where}.mask: unknown kind {rule['kind']!r}") from exc
-        rules.append(MaskRule(_str(rule["region"], "region"), _str(rule["column"], "column"), kind))
+        rules.append(MaskRule(_str(rule["region"], "region"), _str(rule["column"], "column"), volatile))
     return AdapterSpec(
-        kind="sqlite",
+        kind=kind,
         label=_str(data["label"], f"{where}.label"),
         seed=seed,
         exclude=tuple(_strs(data.get("exclude", []), f"{where}.exclude")),
@@ -239,10 +259,14 @@ def _expectation(data: Any, where: str) -> Expectation:
     needs_reason = outcome in (Outcome.INCONCLUSIVE, Outcome.NOT_APPLICABLE)
     if needs_reason != (reason is not None):
         raise FixtureError(f"{where}: INCONCLUSIVE and NOT_APPLICABLE need a reason, and only they may have one")
-    if reason is not None and type(reason).__name__ != {
-        Outcome.INCONCLUSIVE: "InconclusiveReason",
-        Outcome.NOT_APPLICABLE: "NotApplicableReason",
-    }[outcome]:
+    if (
+        reason is not None
+        and type(reason).__name__
+        != {
+            Outcome.INCONCLUSIVE: "InconclusiveReason",
+            Outcome.NOT_APPLICABLE: "NotApplicableReason",
+        }[outcome]
+    ):
         raise FixtureError(f"{where}: {reason.value} is not a reason for {outcome.value}")
     flags = {}
     for key in _FLAGS:
@@ -253,7 +277,7 @@ def _expectation(data: Any, where: str) -> Expectation:
     return Expectation(outcome=outcome, reason=reason, behavior=behavior, secondary=secondary, **flags)
 
 
-def _keys(data: Any, where: str, required: set[str], optional: set[str] = frozenset()) -> None:
+def _keys(data: Any, where: str, required: AbstractSet[str], optional: AbstractSet[str] = frozenset()) -> None:
     if not isinstance(data, Mapping):
         raise FixtureError(f"{where} must be a table")
     missing = required - data.keys()

@@ -1,12 +1,19 @@
 """Observation surfaces: structured, comparable snapshots of server state.
 
-A ``Snapshot`` is a set of named ``Region``s (for SQLite, one per table plus
-schema and pragma regions). Each region holds its records as a canonically
-sorted multiset, so two snapshots of the same state compare equal however the
-rows were written, and duplicate rows are counted rather than collapsed.
+A ``Snapshot`` is a set of named ``Region``s. Each region holds its records
+as a canonically sorted multiset, so two snapshots of the same state compare
+equal however they were written, and duplicate records are counted rather
+than collapsed. Three adapters are provided:
 
-Cells keep their storage class: ``("integer", 1)``, ``("real", 1.0)`` and
-``("text", "1")`` are three different values, as they are to SQLite.
+* ``SQLiteAdapter``: one region per table, plus schema and pragma regions.
+* ``FilesystemAdapter``: one region per top-level entry of a directory tree;
+  records are (path, kind, content hash or link target).
+* ``JsonStoreAdapter``: one region per top-level collection of a JSON
+  document file; records are documents, one column per field.
+
+Cells keep their type: ``("integer", 1)``, ``("real", 1.0)`` and
+``("text", "1")`` are three different values, and a JSON field that is
+missing (``("absent", None)``) differs from one that is ``null``.
 
 Each adapter also reports its ``Coverage``: what on its surface it can and
 cannot see. Classifying regions as business or append-only state is the
@@ -16,6 +23,9 @@ fixture's job (``Classification``), never inferred here.
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
+import os
 import sqlite3
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -47,10 +57,7 @@ class Region:
     def __post_init__(self) -> None:
         for record in self.records:
             if len(record) != len(self.columns):
-                raise ValueError(
-                    f"region {self.name!r}: record has {len(record)} cells, "
-                    f"expected {len(self.columns)}"
-                )
+                raise ValueError(f"region {self.name!r}: record has {len(record)} cells, expected {len(self.columns)}")
         object.__setattr__(self, "records", tuple(sorted(self.records)))
 
     def to_json(self) -> dict[str, Any]:
@@ -163,9 +170,7 @@ class SQLiteAdapter(SnapshotAdapter):
             conn.close()
 
     def _regions(self, conn: sqlite3.Connection) -> Iterable[Region]:
-        schema_rows = conn.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_schema"
-        ).fetchall()
+        schema_rows = conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_schema").fetchall()
         yield Region(
             name=SCHEMA_REGION,
             columns=("type", "name", "tbl_name", "sql"),
@@ -174,9 +179,7 @@ class SQLiteAdapter(SnapshotAdapter):
         yield Region(
             name=PRAGMA_REGION,
             columns=("pragma", "value"),
-            records=tuple(
-                _record((p, conn.execute(f"PRAGMA {p}").fetchone()[0])) for p in _PRAGMAS
-            ),
+            records=tuple(_record((p, conn.execute(f"PRAGMA {p}").fetchone()[0])) for p in _PRAGMAS),
         )
         for kind, name, _, _ in schema_rows:
             if kind != "table" or name in self.exclude:
@@ -206,6 +209,140 @@ def _quote(identifier: str) -> str:
 
 def _record_json(record: Record) -> list[list[Any]]:
     return [[storage, value] for storage, value in record]
+
+
+# --- Filesystem tree ---------------------------------------------------------
+
+FS_COLUMNS = ("path", "kind", "content")
+
+
+class FilesystemAdapter(SnapshotAdapter):
+    """Every directory, regular file and symlink under one directory.
+
+    Each region is one top-level entry of the tree (a file, or a directory
+    and everything beneath it). Records are (relative path, kind, content):
+    the SHA-256 of a file's bytes, a symlink's target, or empty for a
+    directory. Symlinks are recorded, never followed. Modification times,
+    permissions and ownership are not treated as state.
+    """
+
+    def __init__(self, root: Path, label: str, exclude: Iterable[str] = ()) -> None:
+        self.root = Path(root)
+        self.surface = f"fs:{label}"
+        self.exclude = frozenset(exclude)
+
+    def coverage(self) -> Coverage:
+        return Coverage(
+            surface=self.surface,
+            covered=("paths, kinds and content hashes of every entry not excluded", "symlink targets"),
+            uncovered=tuple(f"entry {name} (excluded)" for name in sorted(self.exclude)),
+        )
+
+    def snapshot(self) -> Snapshot:
+        if not self.root.is_dir():
+            raise SnapshotError(f"{self.surface}: no directory at {self.root}")
+        records: dict[str, list[Record]] = {}
+        try:
+            for dirpath, dirnames, filenames in os.walk(self.root, followlinks=False):
+                for name in dirnames + filenames:
+                    path = Path(dirpath) / name
+                    rel = path.relative_to(self.root).as_posix()
+                    region = rel.split("/", 1)[0]
+                    if region in self.exclude:
+                        continue
+                    records.setdefault(region, []).append(_fs_record(path, rel))
+                dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+        except OSError as exc:
+            raise SnapshotError(f"{self.surface}: read failed: {exc}") from exc
+        return Snapshot(
+            surface=self.surface,
+            regions=tuple(Region(name, FS_COLUMNS, tuple(rs)) for name, rs in records.items()),
+        )
+
+
+def _fs_record(path: Path, rel: str) -> Record:
+    if path.is_symlink():
+        kind, content = "symlink", os.readlink(path)
+    elif path.is_dir():
+        kind, content = "dir", ""
+    else:
+        kind, content = "file", hashlib.sha256(path.read_bytes()).hexdigest()
+    return (("text", rel), ("text", kind), ("text", content))
+
+
+# --- JSON document store --------------------------------------------------------
+
+JSON_KEY_COLUMN = "_key"  # the id of a document in a mapping collection
+JSON_VALUE_COLUMN = "_value"  # a document that is not an object, or a scalar collection
+
+
+class JsonStoreAdapter(SnapshotAdapter):
+    """A JSON file whose top-level object maps collection names to collections.
+
+    A collection is a list of documents, an object mapping ids to documents,
+    or a single value. Each collection is one region with one record per
+    document and one column per field (the union across its documents); a
+    mapping collection adds a ``_key`` column. Nested values are compared as
+    canonical JSON text.
+    """
+
+    def __init__(self, path: Path, label: str, exclude: Iterable[str] = ()) -> None:
+        self.path = Path(path)
+        self.surface = f"json:{label}"
+        self.exclude = frozenset(exclude)
+
+    def coverage(self) -> Coverage:
+        return Coverage(
+            surface=self.surface,
+            covered=("every document of every collection not excluded",),
+            uncovered=tuple(f"collection {name} (excluded)" for name in sorted(self.exclude)),
+        )
+
+    def snapshot(self) -> Snapshot:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SnapshotError(f"{self.surface}: cannot read {self.path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise SnapshotError(f"{self.surface}: top level is not a JSON object")
+        regions = [_json_region(name, value) for name, value in data.items() if name not in self.exclude]
+        return Snapshot(surface=self.surface, regions=tuple(regions))
+
+
+def _json_region(name: str, collection: Any) -> Region:
+    if isinstance(collection, list):
+        docs: list[tuple[str | None, Any]] = [(None, d) for d in collection]
+    elif isinstance(collection, dict):
+        docs = list(collection.items())
+    else:
+        docs = [(None, collection)]
+    keyed = isinstance(collection, dict)
+    fields = sorted({k for _, d in docs if isinstance(d, dict) for k in d})
+    has_value = any(not isinstance(d, dict) for _, d in docs)
+    columns = ([JSON_KEY_COLUMN] if keyed else []) + fields + ([JSON_VALUE_COLUMN] if has_value else [])
+    records = []
+    for key, doc in docs:
+        cells: list[Cell] = [("text", key)] if keyed else []
+        for f in fields:
+            cells.append(_json_cell(doc[f]) if isinstance(doc, dict) and f in doc else ("absent", None))
+        if has_value:
+            cells.append(("absent", None) if isinstance(doc, dict) else _json_cell(doc))
+        records.append(tuple(cells))
+    return Region(name, tuple(columns), tuple(records))
+
+
+def _json_cell(value: Any) -> Cell:
+    if value is None:
+        return ("null", None)
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        return ("boolean", value)
+    if isinstance(value, int):
+        return ("integer", value)
+    if isinstance(value, float):
+        return ("real", value)
+    if isinstance(value, str):
+        return ("text", value)
+    return ("json", json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 # --- Classification and deltas ----------------------------------------------
@@ -283,9 +420,7 @@ class SnapshotDelta:
     def to_json(self) -> dict[str, Any]:
         return {
             "surface": self.surface,
-            "by_category": {
-                c.value: [d.to_json() for d in self.in_category(c)] for c in StateCategory
-            },
+            "by_category": {c.value: [d.to_json() for d in self.in_category(c)] for c in StateCategory},
         }
 
 

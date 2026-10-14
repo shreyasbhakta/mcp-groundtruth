@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from mcpgt.fixture import Expectation, Fixture
 from mcpgt.provenance import CaptureProvenance, SourceProvenance, git_state, now_utc, python_version, tree_sha256
 from mcpgt.runner import FixtureRun
 from mcpgt.snapshot import StateCategory
-from mcpgt.verdict import IMPLEMENTED, Verdict, coherence
+from mcpgt.verdict import IMPLEMENTED, Outcome, Reason, Verdict, coherence
 
 SCHEMA = "mcpgt.report/0.1"
 RUNS_DIR = Path("runs")
@@ -54,7 +54,7 @@ def provenance(run: FixtureRun) -> CaptureProvenance:
     )
 
 
-def _verdict_text(outcome, reason) -> str:
+def _verdict_text(outcome: Outcome, reason: Reason | None) -> str:
     return outcome.value + (f":{reason.value}" if reason else "")
 
 
@@ -153,11 +153,11 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str) -> dict[str, An
 
 
 def new_run_id(fixture: Fixture) -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + fixture.name
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ") + "-" + fixture.name
 
 
 def write(report: dict[str, Any], runs_dir: Path = RUNS_DIR) -> Path:
-    path = runs_dir / report["run_id"] / "report.json"
+    path = runs_dir / str(report["run_id"]) / "report.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=False) + "\n")
     return path
@@ -169,7 +169,8 @@ def load(run_id: str, runs_dir: Path = RUNS_DIR) -> dict[str, Any]:
         path = runs_dir / run_id / "report.json"
     if not path.is_file():
         raise FileNotFoundError(f"no report for run {run_id!r} under {runs_dir}")
-    return json.loads(path.read_text())
+    data: dict[str, Any] = json.loads(path.read_text())
+    return data
 
 
 def render_text(report: dict[str, Any]) -> str:
@@ -188,14 +189,14 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append(f"  {tool['tool']}: incoherent declaration: {', '.join(tool['coherence'])}")
         for v in tool["verdicts"]:
             verdict = v["outcome"] + (f":{v['reason']}" if v["reason"] else "")
-            if v["secondary_reasons"]:
-                verdict += " +" + ",".join(r.lower() for r in v["secondary_reasons"])
             observed = f"{v['observed']['property']}={v['observed']['behavior']}"
             exp = v.get("expected")
             mark = "-" if exp is None else ("ok" if exp["matched"] else "MISMATCH")
             lines.append(
                 f"  {tool['tool']:<20} {v['test']:<24} {v['declared']:<10} {verdict:<44} {observed:<26} {mark}"
             )
+            if v["secondary_reasons"]:
+                lines.append(f"  {'':<20}   secondary: {', '.join(v['secondary_reasons'])}")
             conc = v.get("concurrency")
             if conc and conc["attempts"]:
                 parts = []
@@ -204,7 +205,7 @@ def render_text(report: dict[str, Any]) -> str:
                         ov = m["overlap"]
                         parts.append(
                             f"{mode}: {m['diverged']}/{m['attempts']} diverged, overlap "
-                            f"verified {ov['verified']} unverified {ov['unverified']} none {ov['none']}"
+                            f"in_flight {ov['in_flight_overlap']} unverified {ov['unverified']} none {ov['none']}"
                         )
                 by = ", ".join(conc["produced_by"]) or "-"
                 lines.append(f"  {'':<20}   attempts: {'; '.join(parts)}; produced by: {by}")
@@ -218,4 +219,3 @@ def render_text(report: dict[str, Any]) -> str:
     if report["untested_tools"]:
         lines.append(f"  listed but untested (no arguments configured): {', '.join(report['untested_tools'])}")
     return "\n".join(lines)
-

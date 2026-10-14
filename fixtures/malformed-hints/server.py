@@ -51,8 +51,7 @@ def call(name: str, key: str) -> str:
     with contextlib.closing(sqlite3.connect(DB)) as conn, conn:
         if name == "bump":
             conn.execute(
-                "INSERT INTO items (key, value) VALUES (?, 'bumped') "
-                "ON CONFLICT(key) DO UPDATE SET value = 'bumped'",
+                "INSERT INTO items (key, value) VALUES (?, 'bumped') ON CONFLICT(key) DO UPDATE SET value = 'bumped'",
                 (key,),
             )
             return "bumped"

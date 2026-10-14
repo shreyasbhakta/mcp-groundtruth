@@ -3,7 +3,7 @@
 import contextlib
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -25,7 +25,7 @@ def get_item(key: str) -> str:
         row = conn.execute("SELECT value FROM items WHERE key = ?", (key,)).fetchone()
         conn.execute(
             "INSERT INTO lookup_log (key, at) VALUES (?, ?)",
-            (key, datetime.now(timezone.utc).isoformat()),
+            (key, datetime.now(UTC).isoformat()),
         )
     return "" if row is None else row[0]
 

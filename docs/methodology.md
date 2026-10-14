@@ -113,14 +113,23 @@ metadata such as timestamps.
 ### Snapshots
 
 Each fixture declares its observation surfaces (`src/mcpgt/snapshot.py`). A
-snapshot is a set of named regions; for SQLite, one per table plus `@schema`
-(every table, index, view and trigger definition) and `@pragma`
-(`user_version`, `application_id`). Rows are stored as a sorted multiset:
-insertion order does not matter, and duplicate rows are counted, never
-collapsed. Values keep their SQLite storage class, so `1`, `1.0` and `"1"`
-are distinct. Physical layout (hidden rowids, page order) is not state.
+snapshot is a set of named regions, each holding a sorted multiset of
+records: write order does not matter, and duplicate records are counted,
+never collapsed. Three adapters are provided:
 
-Snapshots are read through a read-only connection in a single transaction.
+| Adapter | Surface | Regions | Records |
+|---|---|---|---|
+| `sqlite` | one database file | each table, plus `@schema` (every table, index, view and trigger definition) and `@pragma` (`user_version`, `application_id`) | rows, with their SQLite storage class |
+| `fs` | one directory tree | each top-level entry | (path, kind, SHA-256 of content or symlink target) |
+| `json` | one JSON document file | each top-level collection | documents, one column per field |
+
+Values keep their type: `1`, `1.0`, `"1"` and `true` are distinct, and a JSON
+field that is missing differs from one that is `null`. Not treated as state:
+physical layout (SQLite rowids, page order), file modification times,
+permissions and ownership. Symlinks are recorded, never followed.
+
+SQLite snapshots are read through a read-only connection in a single
+transaction.
 
 ### Coverage
 
@@ -274,33 +283,39 @@ Attempts run in two modes, 20 attempts per mode for fixtures
 
 **Overlap** is recorded per attempt:
 
-- `verified`: two_process only. Both calls were in flight together for
-  longer than the two instances' ping round-trip times combined (worst of 3
-  pings each, measured just before the calls). Since each instance handles
-  only its own call, both were being handled at the same moment. That does
-  not mean their critical sections overlapped: a server that locks its store
+- `in_flight_overlap`: two_process only. Both calls were in flight together
+  for longer than the two instances' ping round-trip times combined (worst of
+  3 pings each, measured just before the calls). Since each instance handles
+  only its own call, both were being handled at the same moment. This
+  threshold is a **heuristic**: it assumes transport delay during the calls
+  is no worse than during the pings, and it says nothing about whether the
+  calls' critical sections overlapped. A server that locks its store
   correctly serializes them internally, and should pass.
-- `unverified`: in flight together, but this cannot prove execution overlap.
+- `unverified`: in flight together, but overlap cannot be established.
   Always the case on a single connection, since a server may handle requests
   one at a time; our own `malformed-hints` server does.
 - `none`: not even in flight together.
 
-A PASS requires at least one attempt with verified overlap and no diverging
-attempt. With no divergence and no verified overlap the verdict is
-`INCONCLUSIVE / NO_OVERLAP_OBSERVED`, never PASS. Every concurrent verdict
+A PASS requires at least one attempt with `in_flight_overlap` and no
+diverging attempt. With no divergence and no `in_flight_overlap` the verdict
+is `INCONCLUSIVE / NO_OVERLAP_OBSERVED`, never PASS. Every concurrent verdict
 records which mode produced it: the modes with diverging attempts for a
-VIOLATION, or with verified overlap for a PASS.
+VIOLATION, or with `in_flight_overlap` for a PASS.
 
-If the control sessions show that server startup or shutdown writes business
-or unclassified state, two_process attempts are excluded: two instances
-start and stop twice as often as a single-call session, so their states are
-not comparable.
+If the control sessions show that server startup or shutdown writes any
+state, two_process attempts are not run: two instances boot twice as often
+as a single-call session, so their end states cannot be compared with it.
+The verdict then carries `TWO_PROCESS_SKIPPED_STARTUP_WRITES` as its own
+(non-blocking, informational) reason. Since only two_process attempts can
+establish overlap, such a server can get VIOLATION or `NO_OVERLAP_OBSERVED`
+from this test, but never PASS. The `startup-writer` fixture exercises this.
 
 Attempts are run only where there is a falsifiable idempotence claim to test
 (`idempotentHint: true`, `readOnlyHint` not explicitly `true`) and the
 single-call baseline is stable across runs. Elsewhere the verdict is decided
 by the declaration or the instability alone, and observed concurrent
-behavior is `unobserved`.
+behavior is `unobserved`. **Concurrent behavior of undeclared tools is out of
+scope for release 0.1.**
 
 Observed with the fixtures: the MCP Python SDK server (`mcp==2.3.0`) does not
 serialize requests on one connection. Two calls to `liar-concurrent` on one
@@ -354,7 +369,7 @@ The primary reason is the first rule that applies:
    `NONDETERMINISTIC`.
 3. What was observed: behavior fails in every run (concurrent test: in any
    attempt) → `VIOLATION`; only unclassified state bears on it →
-   `UNCLASSIFIED_STATE`; concurrent test with no verified overlap →
+   `UNCLASSIFIED_STATE`; concurrent test with no `in_flight_overlap` →
    `NO_OVERLAP_OBSERVED`; coverage incomplete → `PARTIAL_COVERAGE`;
    otherwise `PASS`.
 
@@ -409,6 +424,7 @@ against its expectation and exits non-zero on any mismatch.
 | 8 | `flaky` | random token per call | NONDETERMINISTIC, naming `sessions.token` |
 | 9 | `malformed-hints` | hand-written JSON-RPC, no SDK, one request at a time; string, number, null, duplicate-key and list annotations over two pages; `scribble` writes then returns a JSON-RPC error | MALFORMED_DECLARATION; `readOnlyHint: null` does not supersede; `scribble` VIOLATION with `protocol_error` side effects |
 | 10 | `liar-readonly-error` | claims read-only, writes, returns `isError` | VIOLATION with `errored_with_side_effects`; a clean failure is CALL_ERROR |
+| 11 | `startup-writer` | appends a boot-log row on every start; honest read-only and idempotent tools | read_only PASS (control absorbs the boot row); sequential PASS; concurrent NO_OVERLAP_OBSERVED + TWO_PROCESS_SKIPPED_STARTUP_WRITES |
 
 Every fixture's `fixture.toml` records the expected verdict for every tool and
 implemented test; `tests/test_ground_truth.py` runs them all and fails on any

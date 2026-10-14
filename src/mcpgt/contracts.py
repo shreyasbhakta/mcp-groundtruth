@@ -42,18 +42,14 @@ class Hint(enum.Enum):
     ABSENT = "absent"
 
     def __bool__(self) -> bool:
-        raise TypeError(
-            "Hint has no truth value; compare against Hint.TRUE, Hint.FALSE "
-            "or Hint.ABSENT explicitly"
-        )
+        raise TypeError("Hint has no truth value; compare against Hint.TRUE, Hint.FALSE or Hint.ABSENT explicitly")
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Hint):
             return self is other
         if other is None or isinstance(other, bool):
             raise TypeError(
-                f"comparing Hint to {other!r} is always a bug; compare against "
-                "Hint.TRUE, Hint.FALSE or Hint.ABSENT"
+                f"comparing Hint to {other!r} is always a bug; compare against Hint.TRUE, Hint.FALSE or Hint.ABSENT"
             )
         return NotImplemented
 
@@ -144,16 +140,13 @@ class DeclaredContract:
         for annotation, field_name in _FIELD_FOR.items():
             value = getattr(self, field_name)
             if not isinstance(value, Hint):
-                raise TypeError(
-                    f"{annotation.wire_name} must be a Hint, got {value!r}"
-                )
+                raise TypeError(f"{annotation.wire_name} must be a Hint, got {value!r}")
         if not isinstance(self.annotations_block, AnnotationsBlock):
-            raise TypeError(
-                f"annotations_block must be an AnnotationsBlock, got {self.annotations_block!r}"
-            )
+            raise TypeError(f"annotations_block must be an AnnotationsBlock, got {self.annotations_block!r}")
 
     def hint(self, annotation: Annotation) -> Hint:
-        return getattr(self, _FIELD_FOR[annotation])
+        value: Hint = getattr(self, _FIELD_FOR[annotation])
+        return value
 
     @property
     def declares_anything(self) -> bool:
@@ -192,14 +185,10 @@ class DeclaredContract:
             # A serialized contract must spell out every hint; a missing key
             # here means a corrupt report, not an absent declaration.
             if annotation.wire_name not in hints:
-                raise ContractParseError(
-                    f"serialized contract omits {annotation.wire_name}"
-                )
+                raise ContractParseError(f"serialized contract omits {annotation.wire_name}")
             raw = hints[annotation.wire_name]
             if not isinstance(raw, str):
-                raise ContractParseError(
-                    f"serialized {annotation.wire_name} must be a string, got {raw!r}"
-                )
+                raise ContractParseError(f"serialized {annotation.wire_name} must be a string, got {raw!r}")
             parsed[_FIELD_FOR[annotation]] = Hint(raw)
         return cls(
             tool_name=_require_str(data, "tool"),
@@ -233,6 +222,7 @@ def parse_tool(tool: Mapping[str, Any]) -> DeclaredContract:
                 )
             )
 
+    raw_block: Mapping[str, Any]
     if "annotations" in _duplicates(tool):
         block, raw_block = AnnotationsBlock.MALFORMED, {}
         anomalies.append(
@@ -314,7 +304,7 @@ class ToolListing:
         }
 
 
-class _JsonObject(dict):
+class _JsonObject(dict[str, Any]):
     """A decoded JSON object that remembers keys which appeared more than once."""
 
     duplicates: dict[str, list[Any]]

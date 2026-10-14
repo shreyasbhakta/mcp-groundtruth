@@ -1,0 +1,57 @@
+[fixture]
+name = "startup-writer"
+description = "Appends a boot-log row on every server start; both tools honest."
+command = ["{python}", "server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["settings"]
+append_only = ["boot_log"]
+mask = [{ region = "boot_log", column = "at", kind = "timestamp" }]
+
+[[tools]]
+name = "read_setting"
+arguments = { key = "mode" }
+
+# The control session also boots once, so the startup row is not blamed on the tool.
+[tools.expected.read_only]
+verdict = "PASS"
+secondary = []
+business_changed = false
+append_only_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[[tools]]
+name = "set_setting"
+arguments = { key = "mode", value = "safe" }
+
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+secondary = []
+business_changed = false
+
+# Single-connection attempts cannot establish overlap, and two_process
+# attempts are skipped because each instance writes a boot row.
+[tools.expected.concurrent_idempotence]
+verdict = "INCONCLUSIVE:NO_OVERLAP_OBSERVED"
+secondary = ["TWO_PROCESS_SKIPPED_STARTUP_WRITES"]
+behavior = "holds"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"

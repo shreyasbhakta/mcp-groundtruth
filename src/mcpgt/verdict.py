@@ -21,9 +21,9 @@ PASS only means no race was observed in attempts whose overlap was verified.
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from mcpgt.contracts import Annotation, DeclaredContract, Hint
 from mcpgt.snapshot import SnapshotDelta, StateCategory
@@ -66,8 +66,11 @@ class InconclusiveReason(enum.Enum):
     NONDETERMINISTIC = "NONDETERMINISTIC"
     CALL_ERROR = "CALL_ERROR"
     SETUP_FAILED = "SETUP_FAILED"
-    # Concurrent test only: no race seen, but no attempt was verified to overlap.
+    # Concurrent test only: no race seen, and no attempt had in_flight_overlap.
     NO_OVERLAP_OBSERVED = "NO_OVERLAP_OBSERVED"
+    # Concurrent test only, informational: two_process attempts were not
+    # comparable because server startup or shutdown writes state.
+    TWO_PROCESS_SKIPPED_STARTUP_WRITES = "TWO_PROCESS_SKIPPED_STARTUP_WRITES"
 
 
 class NotApplicableReason(enum.Enum):
@@ -75,7 +78,7 @@ class NotApplicableReason(enum.Enum):
     SUPERSEDED_BY_READ_ONLY = "SUPERSEDED_BY_READ_ONLY"  # explicit readOnlyHint:true
 
 
-Reason = Union[InconclusiveReason, NotApplicableReason]
+Reason = InconclusiveReason | NotApplicableReason
 
 
 def parse_reason(text: str) -> Reason:
@@ -114,7 +117,10 @@ class ConcurrencyMode(enum.Enum):
 
 
 class Overlap(enum.Enum):
-    VERIFIED = "verified"  # calls provably executing at the same time
+    # two_process only: both calls in flight together for longer than both
+    # instances' ping round trips combined. A heuristic: it assumes transport
+    # delay during the calls is no worse than during the pings.
+    IN_FLIGHT = "in_flight_overlap"
     UNVERIFIED = "unverified"  # in flight together, but the server may have serialized them
     NONE = "none"  # not even in flight together
 
@@ -313,7 +319,7 @@ class Verdict:
         if self.outcome is Outcome.VIOLATION:
             hit = {a.mode for a in self.attempts if behavior_in(self.test, a.observation) is Behavior.FAILS}
         elif self.outcome is Outcome.PASS:
-            hit = {a.mode for a in self.attempts if a.overlap is Overlap.VERIFIED}
+            hit = {a.mode for a in self.attempts if a.overlap is Overlap.IN_FLIGHT}
         else:
             hit = set()
         return tuple(m for m in ConcurrencyMode if m in hit)
@@ -378,12 +384,10 @@ class Verdict:
             modes[mode.value] = {
                 "attempts": len(mine),
                 "overlap": {o.value: sum(a.overlap is o for a in mine) for o in Overlap},
-                "diverged": sum(
-                    behavior_in(self.test, a.observation) is Behavior.FAILS for a in mine
-                ),
+                "diverged": sum(behavior_in(self.test, a.observation) is Behavior.FAILS for a in mine),
             }
         return {
-            "one_sided": "VIOLATION is conclusive; PASS means no race observed in verified-overlap attempts",
+            "one_sided": "VIOLATION is conclusive; PASS means no race observed in in_flight_overlap attempts",
             "produced_by": [m.value for m in self.produced_by],
             "note": self.concurrency_note,
             "modes": modes,
@@ -406,9 +410,7 @@ def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
         errors = tuple(ev.concurrent_errors)
     else:
         observations = tuple(ev.effect if control else ev.idempotence)
-        instability = tuple(ev.once_instability) + tuple(
-            run.control_instability if control else ev.twice_instability
-        )
+        instability = tuple(ev.once_instability) + tuple(run.control_instability if control else ev.twice_instability)
         errors = tuple(ev.errors)
     behavior = combined_behavior(test, observations, stable=not instability)
     issues = _issues(run, ev, test, observations, instability, behavior, attempts)
@@ -454,16 +456,21 @@ def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
         return verdict(not_applicable, Issue(NotApplicableReason.PERMISSIVE_DECLARATION, why), issues)
 
     # 2. Problems with the run or the observation block a judgment, except
-    # incomplete coverage, which blocks PASS but not VIOLATION.
-    partial = [i for i in issues if i.reason is InconclusiveReason.PARTIAL_COVERAGE]
-    blocking = [i for i in issues if i.reason is not InconclusiveReason.PARTIAL_COVERAGE]
+    # incomplete coverage, which blocks PASS but not VIOLATION, and a skipped
+    # mode, which is informational.
+    partial = [i for i in issues if i.reason in _NON_BLOCKING]
+    blocking = [i for i in issues if i.reason not in _NON_BLOCKING]
     if blocking:
         return verdict(inconclusive, blocking[0], blocking[1:] + partial)
     if behavior is Behavior.FAILS:
         return verdict(Outcome.VIOLATION, rest=partial)
-    if partial:
-        return verdict(inconclusive, partial[0])
-    return verdict(Outcome.PASS)
+    coverage = [i for i in partial if i.reason is InconclusiveReason.PARTIAL_COVERAGE]
+    if coverage:
+        return verdict(inconclusive, coverage[0], [i for i in partial if i is not coverage[0]])
+    return verdict(Outcome.PASS, rest=partial)
+
+
+_NON_BLOCKING = frozenset({InconclusiveReason.PARTIAL_COVERAGE, InconclusiveReason.TWO_PROCESS_SKIPPED_STARTUP_WRITES})
 
 
 def _issues(
@@ -503,7 +510,8 @@ def _issues(
         issues.append(
             Issue(
                 InconclusiveReason.NONDETERMINISTIC,
-                "states differ across sessions that should match; columns: " + (", ".join(columns) or "(row counts only)"),
+                "states differ across sessions that should match; columns: "
+                + (", ".join(columns) or "(row counts only)"),
             )
         )
     if behavior is Behavior.UNSTABLE and not instability:
@@ -512,11 +520,12 @@ def _issues(
         issues.append(Issue(InconclusiveReason.NONDETERMINISTIC, f"fewer than {MIN_RUNS} complete runs"))
     if behavior is Behavior.UNCLASSIFIED_ONLY:
         issues.append(Issue(InconclusiveReason.UNCLASSIFIED_STATE))
-    if concurrent and ev.concurrent_ran and behavior in (Behavior.HOLDS, Behavior.UNOBSERVED):
-        verified = sum(a.overlap is Overlap.VERIFIED for a in attempts)
-        if not verified:
-            detail = ev.concurrent_note or f"0 of {len(attempts)} attempts had verified overlap"
-            issues.append(Issue(InconclusiveReason.NO_OVERLAP_OBSERVED, detail))
+    no_race_seen = behavior in (Behavior.HOLDS, Behavior.UNOBSERVED)
+    if concurrent and ev.concurrent_ran and no_race_seen and not any(a.overlap is Overlap.IN_FLIGHT for a in attempts):
+        detail = f"0 of {len(attempts)} attempts had in_flight_overlap"
+        issues.append(Issue(InconclusiveReason.NO_OVERLAP_OBSERVED, detail))
+    if concurrent and ev.two_process_skipped:
+        issues.append(Issue(InconclusiveReason.TWO_PROCESS_SKIPPED_STARTUP_WRITES, ev.concurrent_note))
     if not run.coverage.complete:
         issues.append(Issue(InconclusiveReason.PARTIAL_COVERAGE, ", ".join(run.coverage.unobserved) or None))
     return issues

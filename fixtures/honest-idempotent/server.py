@@ -10,7 +10,7 @@ import contextlib
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -30,13 +30,12 @@ def upsert_item(key: str, value: str) -> str:
     """Set item `key` to `value`, creating it if needed."""
     with contextlib.closing(sqlite3.connect(DB)) as conn, conn:
         conn.execute(
-            "INSERT INTO items (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO items (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
         conn.execute(
             "INSERT INTO audit (action, key, at, request_id) VALUES ('upsert', ?, ?, ?)",
-            (key, datetime.now(timezone.utc).isoformat(), str(uuid.uuid4())),
+            (key, datetime.now(UTC).isoformat(), str(uuid.uuid4())),
         )
     return f"{key}={value}"
 

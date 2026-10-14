@@ -39,20 +39,20 @@ def test_hint_has_no_truth_value(hint):
         if hint:
             pass
     with pytest.raises(TypeError):
-        not hint  # noqa: B015
+        not hint
     with pytest.raises(TypeError):
-        hint or Hint.FALSE  # noqa: B018
+        hint or Hint.FALSE
 
 
 @pytest.mark.parametrize("hint", list(Hint))
 @pytest.mark.parametrize("other", [True, False, None])
 def test_hint_refuses_comparison_with_bool_or_none(hint, other):
     with pytest.raises(TypeError):
-        hint == other  # noqa: B015
+        hint == other
     with pytest.raises(TypeError):
-        hint != other  # noqa: B015
+        hint != other
     with pytest.raises(TypeError):
-        other == hint  # noqa: B015
+        other == hint
 
 
 def test_hint_equality_and_hashing_among_hints():
@@ -126,11 +126,9 @@ _STATES = [(True, Hint.TRUE), (False, Hint.FALSE), (_MISSING, Hint.ABSENT)]
     ids=lambda combo: "-".join(h.value for _, h in combo),
 )
 def test_every_hint_combination_maps_exactly(combo):
-    annotations = {
-        name: raw for name, (raw, _) in zip(WIRE_NAMES, combo) if raw is not _MISSING
-    }
+    annotations = {name: raw for name, (raw, _) in zip(WIRE_NAMES, combo, strict=True) if raw is not _MISSING}
     c = parse_tool(tool(annotations))
-    for annotation, (_, expected) in zip(Annotation, combo):
+    for annotation, (_, expected) in zip(Annotation, combo, strict=True):
         assert c.hint(annotation) is expected
     assert c.declares_anything is any(h is not Hint.ABSENT for _, h in combo)
     assert c.anomalies == ()
@@ -390,9 +388,7 @@ def test_duplicate_hint_key_is_malformed(annotations_json, values):
 
 
 def test_duplicate_annotations_block_is_malformed():
-    listing = parse_listing(
-        [_page('[{"name":"a","annotations":{"readOnlyHint":true},"annotations":{}}]')]
-    )
+    listing = parse_listing([_page('[{"name":"a","annotations":{"readOnlyHint":true},"annotations":{}}]')])
     c = listing.contracts["a"]
     assert c.annotations_block is AnnotationsBlock.MALFORMED
     assert c.malformed_hints == set(Annotation)

@@ -11,9 +11,7 @@ def snapshot(*rows, surface="s"):
             Region(
                 name="audit",
                 columns=("id", "action", "at"),
-                records=tuple(
-                    (("integer", i), ("text", action), ("text", at)) for i, action, at in rows
-                ),
+                records=tuple((("integer", i), ("text", action), ("text", at)) for i, action, at in rows),
             ),
         ),
     )

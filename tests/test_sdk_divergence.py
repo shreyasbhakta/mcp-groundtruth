@@ -5,17 +5,16 @@ here fails, the methodology section must be revisited, not the test edited.
 """
 
 import importlib.metadata
+import json
 import sys
 import textwrap
 
-import json
-
 import anyio
 import pytest
-from pydantic import ValidationError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool
+from pydantic import ValidationError
 
 from mcpgt.contracts import Hint, parse_listing
 
@@ -87,7 +86,9 @@ def sdk_list_tools(tools_json: str):
 
 
 def test_sdk_client_resolves_duplicate_keys_last_wins():
-    result = sdk_list_tools('[{"name":"t","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true,"readOnlyHint":false}}]')
+    result = sdk_list_tools(
+        '[{"name":"t","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true,"readOnlyHint":false}}]'
+    )
     assert result.tools[0].annotations.read_only_hint is False
 
 

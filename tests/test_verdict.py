@@ -12,18 +12,22 @@ from mcpgt.verdict import (
     Attempt,
     Behavior,
     ConcurrencyMode,
-    Overlap,
     Incoherence,
-    InconclusiveReason as IR,
     Instability,
-    NotApplicableReason as NA,
     Observation,
     Outcome,
+    Overlap,
     ResetStatus,
     TestKind,
     coherence,
     derive,
     instability_between,
+)
+from mcpgt.verdict import (
+    InconclusiveReason as IR,
+)
+from mcpgt.verdict import (
+    NotApplicableReason as NA,
 )
 
 B, A, U = StateCategory.BUSINESS, StateCategory.APPEND_ONLY, StateCategory.UNCLASSIFIED
@@ -74,12 +78,14 @@ def evidence(
     errored_with_side_effects=False,
     attempts=None,
     concurrent_note=None,
+    two_process_skipped=False,
 ):
     return SimpleNamespace(
         errors=(),
         concurrent=tuple(attempts or ()),
         concurrent_ran=attempts is not None,
         concurrent_note=concurrent_note,
+        two_process_skipped=two_process_skipped,
         concurrent_setup_error=None,
         concurrent_call_error=None,
         concurrent_errors=(),
@@ -166,7 +172,9 @@ def test_permissive_hints_are_not_applicable_with_behavior_attached(test, hints)
     [{}, {"destructiveHint": False, "idempotentHint": True}, {"destructiveHint": True, "idempotentHint": False}],
 )
 def test_explicit_read_only_supersedes_whatever_else_is_declared(test, others):
-    ev = evidence({"readOnlyHint": True, **others}, idem=[obs("once", added=[B])] * 3, effect=[obs("control", removed=[B])] * 3)
+    ev = evidence(
+        {"readOnlyHint": True, **others}, idem=[obs("once", added=[B])] * 3, effect=[obs("control", removed=[B])] * 3
+    )
     v = verdict_for(test, ev)
     assert outcome(v) == (Outcome.NOT_APPLICABLE, NA.SUPERSEDED_BY_READ_ONLY)
     assert v.behavior is Behavior.FAILS  # observed behavior still attached
@@ -185,7 +193,9 @@ def test_only_explicit_true_supersedes(read_only):
 # --- Harness-trust rules ----------------------------------------------------
 
 
-@pytest.mark.parametrize("reset, reason", [(ResetStatus.UNVERIFIED, IR.RESET_UNVERIFIED), (ResetStatus.SETUP_FAILED, IR.SETUP_FAILED)])
+@pytest.mark.parametrize(
+    "reset, reason", [(ResetStatus.UNVERIFIED, IR.RESET_UNVERIFIED), (ResetStatus.SETUP_FAILED, IR.SETUP_FAILED)]
+)
 @pytest.mark.parametrize("test", [SEQ, RO, DE])
 def test_reset_problems_block_every_falsifiable_verdict(test, reset, reason):
     assert verdict_for(test, claim(test), reset=reset).reason is reason
@@ -357,12 +367,12 @@ def attempt(mode, overlap, *, added=()):
     return Attempt(f"t/{mode.value}", mode, overlap, 5.0, (0.2,), obs("once", added=added))
 
 
-def held(n, mode=TWO, overlap=Overlap.VERIFIED):
+def held(n, mode=TWO, overlap=Overlap.IN_FLIGHT):
     return [attempt(mode, overlap) for _ in range(n)]
 
 
 def test_a_single_diverging_attempt_is_a_conclusive_violation():
-    attempts = held(19) + [attempt(ONE, Overlap.UNVERIFIED, added=[B])]
+    attempts = [*held(19), attempt(ONE, Overlap.UNVERIFIED, added=[B])]
     v = verdict_for(CO, claim(CO, attempts=attempts))
     assert outcome(v) == (Outcome.VIOLATION, None)
     assert v.produced_by == (ONE,)
@@ -388,12 +398,12 @@ def test_no_verified_overlap_is_never_pass(attempts):
 
 
 def test_unstable_single_call_baseline_blocks_even_a_divergence():
-    ev = claim(CO, attempts=[attempt(TWO, Overlap.VERIFIED, added=[B])], once_instability=(UNSTABLE,))
+    ev = claim(CO, attempts=[attempt(TWO, Overlap.IN_FLIGHT, added=[B])], once_instability=(UNSTABLE,))
     assert verdict_for(CO, ev).reason is IR.NONDETERMINISTIC
 
 
 def test_concurrent_unclassified_divergence():
-    v = verdict_for(CO, claim(CO, attempts=held(5) + [attempt(TWO, Overlap.VERIFIED, added=[U])]))
+    v = verdict_for(CO, claim(CO, attempts=[*held(5), attempt(TWO, Overlap.IN_FLIGHT, added=[U])]))
     assert outcome(v) == (Outcome.INCONCLUSIVE, IR.UNCLASSIFIED_STATE)
 
 
@@ -412,3 +422,14 @@ def test_attempts_not_run_add_no_overlap_noise():
     v = verdict_for(CO, evidence({"readOnlyHint": True}, concurrent_note="attempts not run"))
     assert outcome(v) == (Outcome.NOT_APPLICABLE, NA.SUPERSEDED_BY_READ_ONLY)
     assert IR.NO_OVERLAP_OBSERVED not in v.secondary_reasons
+
+
+def test_skipped_two_process_mode_is_its_own_secondary_reason():
+    ev = claim(CO, attempts=held(20, ONE, Overlap.UNVERIFIED), two_process_skipped=True, concurrent_note="skipped")
+    v = verdict_for(CO, ev)
+    assert outcome(v) == (Outcome.INCONCLUSIVE, IR.NO_OVERLAP_OBSERVED)
+    assert v.secondary_reasons == (IR.TWO_PROCESS_SKIPPED_STARTUP_WRITES,)
+    raced = claim(CO, attempts=[attempt(ONE, Overlap.UNVERIFIED, added=[B])], two_process_skipped=True)
+    v = verdict_for(CO, raced)
+    assert outcome(v) == (Outcome.VIOLATION, None)
+    assert v.secondary_reasons == (IR.TWO_PROCESS_SKIPPED_STARTUP_WRITES,)

@@ -11,7 +11,7 @@ import platform
 import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ class CaptureProvenance:
 
 
 def now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def python_version() -> str:
@@ -60,9 +60,7 @@ def git_state(path: Path) -> tuple[str | None, bool | None]:
 
     def git(*args: str) -> str | None:
         try:
-            proc = subprocess.run(
-                ["git", "-C", str(path), *args], capture_output=True, text=True, check=False
-            )
+            proc = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, check=False)
         except OSError:
             return None
         return proc.stdout if proc.returncode == 0 else None

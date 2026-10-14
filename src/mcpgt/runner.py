@@ -15,9 +15,9 @@ import asyncio
 import dataclasses
 import json
 import os
-import time
 import shutil
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,16 +56,32 @@ def reset(fixture: Fixture, state_dir: Path) -> None:
         shutil.rmtree(state_dir)
     state_dir.mkdir(parents=True)
     for spec in fixture.adapters:
-        db = state_dir / spec.label
-        conn = sqlite3.connect(db)
+        target = state_dir / spec.label
+        seed = None if spec.seed is None else fixture.root / spec.seed
         try:
-            if spec.seed is not None:
-                conn.executescript((fixture.root / spec.seed).read_text())
-            conn.commit()
-        except sqlite3.Error as exc:
+            if spec.kind == "sqlite":
+                _seed_sqlite(target, seed)
+            elif spec.kind == "fs":
+                if seed is None:
+                    target.mkdir(parents=True)
+                else:
+                    shutil.copytree(seed, target, symlinks=True)
+            elif seed is None:
+                target.write_text("{}\n")
+            else:
+                shutil.copyfile(seed, target)
+        except (sqlite3.Error, OSError) as exc:
             raise SetupError(f"{spec.surface}: seed failed: {exc}") from exc
-        finally:
-            conn.close()
+
+
+def _seed_sqlite(db: Path, script: Path | None) -> None:
+    conn = sqlite3.connect(db)
+    try:
+        if script is not None:
+            conn.executescript(script.read_text())
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def observe(fixture: Fixture, state_dir: Path) -> State:
@@ -82,9 +98,7 @@ def normalized(fixture: Fixture, state: State) -> State:
 def deltas(fixture: Fixture, before: State, after: State) -> tuple[SnapshotDelta, ...]:
     """Per-surface deltas between two states, both normalized first."""
     b, a = normalized(fixture, before), normalized(fixture, after)
-    return tuple(
-        diff(b[s], a[s], fixture.adapter_spec(s).classification) for s in sorted(b.keys() | a.keys())
-    )
+    return tuple(diff(b[s], a[s], fixture.adapter_spec(s).classification) for s in sorted(b.keys() | a.keys()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,9 +135,7 @@ def verify_reset(fixture: Fixture, state_dir: Path) -> ResetVerification:
         return ResetVerification(ResetStatus.SETUP_FAILED, str(exc), (), coverage)
     changed = tuple(d for d in deltas(fixture, first, second) if d.regions)
     if changed:
-        return ResetVerification(
-            ResetStatus.UNVERIFIED, "two resets produced different state", changed, coverage
-        )
+        return ResetVerification(ResetStatus.UNVERIFIED, "two resets produced different state", changed, coverage)
     return ResetVerification(ResetStatus.VERIFIED, None, (), coverage)
 
 
@@ -195,9 +207,7 @@ class Session:
         }
 
 
-async def run_session(
-    fixture: Fixture, state_dir: Path, label: str, calls: Sequence[ToolSpec] = ()
-) -> Session:
+async def run_session(fixture: Fixture, state_dir: Path, label: str, calls: Sequence[ToolSpec] = ()) -> Session:
     names = tuple(c.name for c in calls)
     try:
         reset(fixture, state_dir)
@@ -268,6 +278,7 @@ class ToolEvidence:
     concurrent: tuple[Attempt, ...] = ()
     concurrent_ran: bool = False
     concurrent_note: str | None = None  # why attempts were not run, or a mode was excluded
+    two_process_skipped: bool = False  # server lifecycle writes state; two_process not comparable
     concurrent_setup_error: str | None = None
     concurrent_call_error: str | None = None
     concurrent_errors: tuple[ErrorRecord, ...] = ()
@@ -363,14 +374,12 @@ async def run_fixture(
         contract, contract_error, contract_instability = _contract_for(spec.name, contract_sets, listing_errors)
         call_error, side_effects, errors = _error_evidence(fixture, once, twice, baseline)
         idempotence = tuple(
-            Observation("once", deltas(fixture, o.after, t.after))
-            for o, t in zip(once, twice)
+            Observation("once", deltas(fixture, _end(o), _end(t)))
+            for o, t in zip(once, twice, strict=True)
             if o.ok and t.ok
         )
         effect = tuple(
-            Observation("control", deltas(fixture, baseline, o.after))
-            for o in once
-            if baseline is not None and o.ok
+            Observation("control", deltas(fixture, baseline, _end(o))) for o in once if baseline is not None and o.ok
         )
         evidence.append(
             ToolEvidence(
@@ -392,20 +401,22 @@ async def run_fixture(
 
     # Concurrent attempts, only where there is a falsifiable idempotence claim
     # to test, so the 2 x N extra sessions are spent where they can decide.
-    lifecycle_inert = all(
-        not (o.changed(StateCategory.BUSINESS) or o.changed(StateCategory.UNCLASSIFIED)) for o in control_effect
-    )
-    for i, (spec, ev) in enumerate(zip(specs, evidence)):
+    lifecycle_inert = all(not any(o.changed(c) for c in StateCategory) for o in control_effect)
+    for i, (spec, ev) in enumerate(zip(specs, evidence, strict=True)):
         once_ok = [o for o in per_tool[spec.name][0] if o.ok]
         reason = _concurrent_skip_reason(ev, once_ok)
         if reason is not None:
             evidence[i] = dataclasses.replace(ev, concurrent_note=reason)
             continue
         attempts_raw: list[ConcurrentRun] = []
-        for mode in ConcurrencyMode:
+        # Two instances boot twice: if booting writes state, those attempts
+        # could never be compared with a single-call session, so skip them.
+        modes = [m for m in ConcurrencyMode if lifecycle_inert or m is not ConcurrencyMode.TWO_PROCESS]
+        for mode in modes:
             for n in range(1, concurrent_attempts + 1):
-                attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, f"{spec.name}/{mode.value}-{n}"))
-        evidence[i] = _with_concurrent(fixture, ev, attempts_raw, once_ok[0].after, baseline, lifecycle_inert)
+                label = f"{spec.name}/{mode.value}-{n}"
+                attempts_raw.append(await run_concurrent(fixture, state_dir, spec, mode, label))
+        evidence[i] = _with_concurrent(fixture, ev, attempts_raw, _end(once_ok[0]), baseline, lifecycle_inert)
 
     listed = {name for contracts in contract_sets for name in contracts}
     return FixtureRun(
@@ -424,6 +435,13 @@ async def run_fixture(
     )
 
 
+def _end(session: Session | ConcurrentRun) -> State:
+    """The observed end state of a session already known to be ``ok``."""
+    if session.after is None:
+        raise RuntimeError(f"{session.label}: no observed end state")
+    return session.after
+
+
 def _instability(fixture: Fixture, sessions: Sequence[Session]) -> tuple[Instability, ...]:
     """Each session whose normalized end state differs from the first one's."""
     if not sessions:
@@ -431,7 +449,7 @@ def _instability(fixture: Fixture, sessions: Sequence[Session]) -> tuple[Instabi
     first = sessions[0]
     found = []
     for other in sessions[1:]:
-        item = instability_between((first.label, other.label), deltas(fixture, first.after, other.after))
+        item = instability_between((first.label, other.label), deltas(fixture, _end(first), _end(other)))
         if item is not None:
             found.append(item)
     return tuple(found)
@@ -514,14 +532,15 @@ class ConcurrentRun:
 
     @property
     def overlap(self) -> Overlap:
-        """Two independent instances: execution overlap is proven when both calls
-        were in flight together for longer than both transport round trips
-        combined. One connection: never provable, the server may serialize."""
+        """Two independent instances: ``in_flight_overlap`` when both calls were
+        in flight together for longer than both instances' ping round trips
+        combined (a heuristic). One connection: never established, since the
+        server may serialize requests."""
         wire = self.wire_overlap
         if wire is None or wire <= 0:
             return Overlap.NONE
         if self.mode is ConcurrencyMode.TWO_PROCESS and len(self.rtts) == 2 and wire > sum(self.rtts):
-            return Overlap.VERIFIED
+            return Overlap.IN_FLIGHT
         return Overlap.UNVERIFIED
 
     def to_json(self) -> dict[str, Any]:
@@ -624,7 +643,7 @@ def _with_concurrent(
         # Two instances start and stop twice as often as a single-call session;
         # if startup or shutdown writes state, the states are not comparable.
         usable = [r for r in runs if r.mode is not ConcurrencyMode.TWO_PROCESS]
-        note = "two_process attempts excluded: server startup/shutdown writes business or unclassified state"
+        note = "two_process attempts excluded: server startup or shutdown writes state"
     setup_error = next((f"{r.label}: {r.setup_error}" for r in usable if r.setup_error), None)
     call_error = next((f"{r.label}: {r.wire_error}" for r in usable if r.wire_error), None)
     attempts: list[Attempt] = []
@@ -648,7 +667,7 @@ def _with_concurrent(
                 overlap=r.overlap,
                 wire_overlap_ms=None if wire is None else round(wire * 1000, 3),
                 rtt_ms=tuple(round(t * 1000, 3) for t in r.rtts),
-                observation=Observation("once", deltas(fixture, single_call_state, r.after)),
+                observation=Observation("once", deltas(fixture, single_call_state, _end(r))),
             )
         )
     return dataclasses.replace(
@@ -656,6 +675,7 @@ def _with_concurrent(
         concurrent=tuple(attempts),
         concurrent_ran=True,
         concurrent_note=note,
+        two_process_skipped=not lifecycle_inert,
         concurrent_setup_error=setup_error,
         concurrent_call_error=call_error,
         concurrent_errors=tuple(records),
@@ -695,9 +715,7 @@ def _contract_for(
     if not seen:
         why = "; ".join(errors) if errors else f"tool {name!r} not in any tools/list response"
         return None, why, ()
-    differing = [
-        a.wire_name for a in Annotation if len({c.hint(a) for c in seen}) > 1
-    ]
+    differing = [a.wire_name for a in Annotation if len({c.hint(a) for c in seen}) > 1]
     if len(seen) < len(contract_sets):
         differing.append("(tool missing from some listings)")
     elif not differing and any(c != seen[0] for c in seen):

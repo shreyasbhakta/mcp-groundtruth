@@ -46,19 +46,19 @@ def test_concurrent_verdict_reports_attempts_and_mode(first):
     conc = v.to_json()["concurrency"]
     assert conc["produced_by"] == ["two_process"]
     assert conc["modes"]["two_process"]["attempts"] == 20
-    assert conc["modes"]["single_connection"]["overlap"]["verified"] == 0  # never provable on one connection
+    assert conc["modes"]["single_connection"]["overlap"]["in_flight_overlap"] == 0  # never provable on one connection
     assert len(conc["attempts"]) == 40
 
 
 def test_control_sessions_are_stable_and_inert(first):
-    run, _, report = first
+    run, _, _ = first
     assert run.control_stable
     assert len(run.controls) == 3
     assert not any(o.deltas[0].regions for o in run.control_effect)
 
 
 def test_report_carries_raw_listing_and_provenance(first):
-    run, _, report = first
+    _, _, report = first
     (listing,) = report["listing"]["listings"]
     assert len(listing["sessions"]) == 3 + 3 * 2
     assert listing["raw_pages"][0].startswith('{"jsonrpc":"2.0"')
