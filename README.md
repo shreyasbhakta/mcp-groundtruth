@@ -158,9 +158,8 @@ Requirements: Python 3.11 or later. macOS or Linux.
 Install the `mcpgt` command:
 
 ```bash
-pip install mcp-groundtruth                # once published to PyPI
+pip install mcp-groundtruth                # install from PyPI
 uvx --from mcp-groundtruth mcpgt --help    # or run it without installing
-uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from source, today
 ```
 
 To test your own server, follow [Test your own MCP server](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/your-server.md),

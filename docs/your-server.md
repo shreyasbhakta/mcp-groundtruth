@@ -24,12 +24,14 @@ for the definitions.
 ## 1. Install
 
 ```bash
-pip install mcp-groundtruth        # once published to PyPI
-uv tool install git+https://github.com/shreyasbhakta/mcp-groundtruth   # from source
+pip install mcp-groundtruth               # install from PyPI
+uvx --from mcp-groundtruth mcpgt --help   # or run it without installing
 ```
 
-Either gives you the `mcpgt` command. The example server is in the
-repository, so for this walk-through also clone it and work from its root:
+`pip install` gives you the `mcpgt` command used throughout this guide. With
+`uvx`, write `uvx --from mcp-groundtruth mcpgt` wherever the guide says
+`mcpgt`. The example server is in the repository, so for this walk-through
+also clone it and work from its root:
 
 ```bash
 git clone https://github.com/shreyasbhakta/mcp-groundtruth.git
