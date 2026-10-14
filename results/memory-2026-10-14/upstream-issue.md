@@ -1,6 +1,6 @@
-# Draft issue for modelcontextprotocol/servers (Feature request form)
+# Issue for modelcontextprotocol/servers (Feature request form)
 
-Not opened. Title and body below.
+Opened on 2026-10-14 as [modelcontextprotocol/servers#5153](https://github.com/modelcontextprotocol/servers/issues/5153). The title and body as drafted are below.
 
 **Title:** memory: create_entities, create_relations and add_observations could declare idempotentHint: true
 

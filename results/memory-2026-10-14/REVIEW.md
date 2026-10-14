@@ -121,4 +121,4 @@ Neither affects idempotence, which concerns repeated identical calls.
   note in `target.toml` explains why).
 - Results are from macOS. On Linux the sandbox does not confine file writes.
 
-Draft upstream issue (not opened): [upstream-issue.md](upstream-issue.md).
+Upstream issue: [modelcontextprotocol/servers#5153](https://github.com/modelcontextprotocol/servers/issues/5153), opened on 2026-10-14 (draft: [upstream-issue.md](upstream-issue.md)).
