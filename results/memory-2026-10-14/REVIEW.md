@@ -121,4 +121,4 @@ Neither affects idempotence, which concerns repeated identical calls.
   note in `target.toml` explains why).
 - Results are from macOS. On Linux the sandbox does not confine file writes.
 
-Draft upstream proposal (not opened): [upstream-pr.md](upstream-pr.md).
+Draft upstream issue (not opened): [upstream-issue.md](upstream-issue.md).

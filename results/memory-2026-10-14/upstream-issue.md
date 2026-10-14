@@ -1,24 +1,26 @@
-# Draft pull request for modelcontextprotocol/servers
+# Draft issue for modelcontextprotocol/servers (Feature request form)
 
 Not opened. Title and body below.
 
-**Title:** memory: declare `idempotentHint: true` for create_entities, create_relations and add_observations
+**Title:** memory: create_entities, create_relations and add_observations could declare idempotentHint: true
 
 ---
 
-## Summary
+## Server
 
-Sets `idempotentHint: true` on `create_entities`, `create_relations` and `add_observations`. No other change.
+memory (`@modelcontextprotocol/server-memory` 1.0.0)
 
-## Why
+## Problem
 
-All three already skip work that has been done (`src/memory/index.ts` at `bbb701e`):
+`create_entities`, `create_relations` and `add_observations` declare `idempotentHint: false`, although a repeated identical call has no additional effect. Clients that respect the hint therefore won't safely auto-retry them, for example after a timeout. The three delete tools already declare `idempotentHint: true` for the same reason: a repeat has nothing left to do.
+
+All three already skip work that has been done (`src/memory/index.ts` at `bbb701e`, the commit tested):
 
 - `createEntities` skips names that already exist or repeat earlier in the batch ([L517–L532](https://github.com/modelcontextprotocol/servers/blob/bbb701e7ac1e57f3edd1c2836b94c5457eaf7b9c/src/memory/index.ts#L517-L532)).
 - `createRelations` skips relations that already exist or repeat in the batch ([L534–L564](https://github.com/modelcontextprotocol/servers/blob/bbb701e7ac1e57f3edd1c2836b94c5457eaf7b9c/src/memory/index.ts#L534-L564)).
 - `addObservations` skips contents the entity already has ([L566–L585](https://github.com/modelcontextprotocol/servers/blob/bbb701e7ac1e57f3edd1c2836b94c5457eaf7b9c/src/memory/index.ts#L566-L585)).
 
-A repeated call with the same arguments therefore has no additional effect, which is what the specification defines `idempotentHint` to mean. The three delete tools already declare `idempotentHint: true` because a repeat finds nothing left to do; this change makes the server's annotations consistent with each other.
+`v2/main` at `38569bd` still declares `false` ([L797](https://github.com/modelcontextprotocol/servers/blob/38569bd5762d3e4ef07f8062b01325121fa59d06/src/memory/index.ts#L797), [L842](https://github.com/modelcontextprotocol/servers/blob/38569bd5762d3e4ef07f8062b01325121fa59d06/src/memory/index.ts#L842), [L888](https://github.com/modelcontextprotocol/servers/blob/38569bd5762d3e4ef07f8062b01325121fa59d06/src/memory/index.ts#L888)), and the three methods are unchanged between the two commits.
 
 ## Evidence
 
@@ -40,3 +42,9 @@ uv run mcpgt run memory --audit --observe-concurrent --tool create_entities --to
 - Only repeated identical arguments were tested; that is what the hint covers.
 - The concurrent evidence is weak. In 180 two-process attempts the requests overlapped on the wire and none diverged, but the lock file serializes writes.
 - One seed graph and 12 hand-chosen argument sets, on macOS only.
+
+## Environment
+
+- Server built from source at `bbb701e` (`npm ci --ignore-scripts --no-audit --no-fund`, `npm run build --workspace src/memory`) and run over stdio
+- Client `initialize` sends `protocolVersion: "2025-11-25"`, and the server answers with the same version
+- macOS, Node 24.21.0
