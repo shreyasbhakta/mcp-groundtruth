@@ -120,3 +120,5 @@ Neither affects idempotence, which concerns repeated identical calls.
   so their order within an entity is not treated as state (the modelling
   note in `target.toml` explains why).
 - Results are from macOS. On Linux the sandbox does not confine file writes.
+
+Draft upstream proposal (not opened): [upstream-pr.md](upstream-pr.md).
