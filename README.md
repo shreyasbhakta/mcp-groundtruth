@@ -344,18 +344,14 @@ uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
 
 ## Audit results
 
-One server has been audited: the reference memory server
-(`@modelcontextprotocol/server-memory`) at `modelcontextprotocol/servers@bbb701e`,
-with one seeded graph, under Node 24 on macOS. The results say nothing about
-other servers or other versions of this one.
+Two servers have been audited, both from `modelcontextprotocol/servers@bbb701e`,
+each with one seeded state, under Node 24 on macOS. The results say nothing
+about other servers or other versions of these.
 
-- No violations of a declared hint.
-- Three over-declarations: `create_entities`, `create_relations` and
-  `add_observations` declare `idempotentHint: false`, but repeating a call
-  with identical arguments changed nothing in any of 12 argument sets tested.
-
-Reports, hand review and caveats:
-[results/memory-2026-10-14/REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/memory-2026-10-14/REVIEW.md).
+| Server | Tools (argument sets) | Violations | Over-declarations | Review |
+|---|---|---|---|---|
+| memory (`@modelcontextprotocol/server-memory` 1.0.0) | 9 (one each, and 12 for the three create/add tools) | none | 3: `create_entities`, `create_relations` and `add_observations` declare `idempotentHint: false`, but a repeated identical call changed nothing | [REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/memory-2026-10-14/REVIEW.md) |
+| filesystem (`@modelcontextprotocol/server-filesystem` 1.0.0) | 14 (22) | none | 1: `move_file` declares `idempotentHint: false`; a repeat changes nothing but reports an error, so `false` is defensible | [REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/filesystem-2026-10-14/REVIEW.md) |
 
 ---
 

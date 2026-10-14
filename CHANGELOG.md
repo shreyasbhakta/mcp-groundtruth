@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `targets/filesystem`: the reference filesystem server pinned at
+  `modelcontextprotocol/servers@bbb701e`, with its reviewed audit in
+  `results/filesystem-2026-10-14/`.
 - `fs` adapters: `modes = true` records permission bits as state, and
   `empty_dirs` creates empty directories after the seed is copied (git
   cannot store them).
