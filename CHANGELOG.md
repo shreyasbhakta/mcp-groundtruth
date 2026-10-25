@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The format follows
   violations.
 - `fixtures/network-side-effects`: read-only tools that beacon, look up a
   name carrying the canary, upload it, or start an unobservable child.
+- `results/network-2026-10-25/`: the network check on the memory and
+  filesystem servers. No tool of either attempted any network operation
+  (246 fully observed sessions).
 - `targets/filesystem`: the reference filesystem server pinned at
   `modelcontextprotocol/servers@bbb701e`, with its reviewed audit in
   `results/filesystem-2026-10-14/`.
