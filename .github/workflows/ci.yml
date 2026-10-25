@@ -44,6 +44,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --locked
+      # Lets the sandbox tests run on Linux too. Disables an Ubuntu security
+      # restriction: acceptable only because GitHub-hosted runners are
+      # ephemeral; never run this on developer machines, servers or
+      # persistent self-hosted runners.
+      - name: Allow unprivileged user namespaces for the Linux sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv run mcpgt --version
       - run: uv run pytest -ra
 
