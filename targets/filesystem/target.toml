@@ -50,6 +50,13 @@ timestamp would therefore not be seen. Ownership and extended attributes are \
 not observed either; no tool here changes them.\
 """
 
+[network]
+# No tool of this server should reach the network: every tool declares
+# openWorldHint: false. The capture endpoint stands in for every destination
+# (the sandbox allows only it) and is the server's HTTP(S) proxy.
+policy = "deny"
+capture = true
+
 # --- Tools --------------------------------------------------------------
 # Paths are relative: lib.ts validatePath resolves them against the allowed
 # directory. Arguments checked against the zod schemas in server.ts.

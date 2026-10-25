@@ -52,6 +52,13 @@ graph it carries no meaning.\
 """
 business = ["entity", "entity.observations", "relation"]
 
+[network]
+# No tool of this server should reach the network: every tool declares
+# openWorldHint: false. The capture endpoint stands in for every destination
+# (the sandbox allows only it) and is the server's HTTP(S) proxy.
+policy = "deny"
+capture = true
+
 # Call arguments, chosen against the seeded graph so every call does real work.
 
 [[tools]]
