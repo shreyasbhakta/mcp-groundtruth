@@ -11,8 +11,9 @@
  *   connect  connect(): destination address, socket type, result and errno
  *   send     sendto()/sendmsg() with an explicit destination (UDP): address,
  *            length, and whether the bytes contain $MCPGT_CANARY
- *   exec     execve() and posix_spawn(): the program, and for posix_spawn the
- *            child pid, so a child that never says hello is a coverage gap
+ *   exec     execve() and posix_spawn() (on Linux also execv, execvp, execvpe
+ *            and execl*): the program, and the pid that will run it, so a
+ *            child that never says hello is a coverage gap
  *
  * No payload bytes are recorded, only lengths and the canary flag.
  *
@@ -30,6 +31,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <spawn.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -298,6 +300,77 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     REAL(execve);
     log_exec("execve", path, (int)getpid(), 0);
     return real_execve(path, argv, envp);
+}
+
+/* glibc's execv, execvp, execvpe and execl* call the real execve internally,
+ * past this library, so each is wrapped too (CPython uses execv for a child
+ * that inherits its environment). The execl* forms collect their variadic
+ * arguments and go through the execv* wrappers. */
+
+typedef int (*execv_fn)(const char *, char *const[]);
+typedef int (*execvpe_fn)(const char *, char *const[], char *const[]);
+
+int execv(const char *path, char *const argv[]) {
+    static execv_fn real = NULL;
+    if (real == NULL) *(void **)(&real) = dlsym(RTLD_NEXT, "execv");
+    log_exec("execv", path, (int)getpid(), 0);
+    return real(path, argv);
+}
+
+int execvp(const char *file, char *const argv[]) {
+    static execv_fn real = NULL;
+    if (real == NULL) *(void **)(&real) = dlsym(RTLD_NEXT, "execvp");
+    log_exec("execvp", file, (int)getpid(), 0);
+    return real(file, argv);
+}
+
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+    static execvpe_fn real = NULL;
+    if (real == NULL) *(void **)(&real) = dlsym(RTLD_NEXT, "execvpe");
+    log_exec("execvpe", file, (int)getpid(), 0);
+    return real(file, argv, envp);
+}
+
+#define MAX_EXECL_ARGS 256
+
+static int collect(const char *first, va_list ap, char **argv, char ***envp) {
+    int n = 0;
+    argv[n++] = (char *)first;
+    while (n < MAX_EXECL_ARGS && argv[n - 1] != NULL) argv[n++] = va_arg(ap, char *);
+    if (argv[n - 1] != NULL) {
+        errno = E2BIG;
+        return -1;
+    }
+    if (envp != NULL) *envp = va_arg(ap, char **);
+    return 0;
+}
+
+int execl(const char *path, const char *arg, ...) {
+    char *argv[MAX_EXECL_ARGS];
+    va_list ap;
+    va_start(ap, arg);
+    int rc = collect(arg, ap, argv, NULL);
+    va_end(ap);
+    return rc < 0 ? -1 : execv(path, argv);
+}
+
+int execlp(const char *file, const char *arg, ...) {
+    char *argv[MAX_EXECL_ARGS];
+    va_list ap;
+    va_start(ap, arg);
+    int rc = collect(arg, ap, argv, NULL);
+    va_end(ap);
+    return rc < 0 ? -1 : execvp(file, argv);
+}
+
+int execle(const char *path, const char *arg, ...) {
+    char *argv[MAX_EXECL_ARGS];
+    char **envp = NULL;
+    va_list ap;
+    va_start(ap, arg);
+    int rc = collect(arg, ap, argv, &envp);
+    va_end(ap);
+    return rc < 0 ? -1 : execve(path, argv, envp);
 }
 
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa, const posix_spawnattr_t *attr,

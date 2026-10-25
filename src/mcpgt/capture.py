@@ -106,10 +106,11 @@ def parse(data: bytes, canary: str | None, ts: int, peer_port: int) -> CaptureEv
 class CaptureServer:
     """The endpoint. ``async with CaptureServer(canary) as cap:`` binds it; leaving closes it."""
 
-    def __init__(self, canary: str | None = None) -> None:
+    def __init__(self, canary: str | None = None, unix_path: str | None = None) -> None:
         self.canary = canary
+        self.unix_path = unix_path  # also listen here: the Linux namespace relay connects to it
         self.events: list[CaptureEvent] = []
-        self._server: asyncio.Server | None = None
+        self._servers: list[asyncio.Server] = []
         self.port = 0
 
     @property
@@ -117,20 +118,25 @@ class CaptureServer:
         return f"http://127.0.0.1:{self.port}"
 
     async def __aenter__(self) -> CaptureServer:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
-        self.port = self._server.sockets[0].getsockname()[1]
+        tcp = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self._servers.append(tcp)
+        self.port = tcp.sockets[0].getsockname()[1]
+        if self.unix_path is not None:
+            self._servers.append(await asyncio.start_unix_server(self._handle, self.unix_path))
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._server is not None:
-            self._server.close()
+        for server in self._servers:
+            server.close()
             with contextlib.suppress(Exception):
-                await self._server.wait_closed()
-            self._server = None
+                await server.wait_closed()
+        self._servers.clear()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         ts = time.time_ns()
-        peer = writer.get_extra_info("peername") or ("", 0)
+        peer = writer.get_extra_info("peername")
+        if not isinstance(peer, tuple):  # a Unix socket: the relay
+            peer = ("", 0)
         buf = bytearray()
         # A slow or silent client still leaves whatever it sent in buf.
         with contextlib.suppress(TimeoutError, ConnectionError):

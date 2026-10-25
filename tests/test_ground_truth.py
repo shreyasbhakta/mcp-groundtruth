@@ -6,7 +6,6 @@ matters most.
 """
 
 import asyncio
-import sys
 from pathlib import Path
 
 import pytest
@@ -62,8 +61,6 @@ def network_skip(fx):
         isolation()
     except IsolationUnavailable as exc:
         return str(exc)
-    if fx.network.capture and sys.platform != "darwin":
-        return "the capture endpoint needs the macOS sandbox"
     return None
 
 

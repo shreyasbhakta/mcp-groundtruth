@@ -14,6 +14,7 @@ gap. Neither is ever read as "no network activity".
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import platform
@@ -30,8 +31,11 @@ CACHE_DIR = Path(".mcpgt") / "netobs"
 LOG_ENV = "MCPGT_NETOBS_LOG"
 CANARY_ENV = "MCPGT_CANARY"
 OPS = ("hello", "resolve", "connect", "send", "exec")
-BLOCKED_ERRNOS = {1, 13}  # EPERM, EACCES: the sandbox refused the operation
-IN_PROGRESS_ERRNOS = {36, 115}  # EINPROGRESS on macOS and Linux: non-blocking connect under way
+# The boundary's refusals: the macOS sandbox answers EPERM or EACCES; an empty
+# Linux network namespace has no route anywhere, ENETUNREACH. The log is read
+# on the host that wrote it, so the host's errno values apply.
+BLOCKED_ERRNOS = {errno.EPERM, errno.EACCES, errno.ENETUNREACH}
+IN_PROGRESS_ERRNOS = {errno.EINPROGRESS}  # a non-blocking connect under way
 
 
 class ObserverUnavailable(RuntimeError):
@@ -179,7 +183,8 @@ def parse_line(line: str) -> RawEvent | None:
 def outcome(event: RawEvent) -> str:
     """What happened to one attempt, as far as the call's own result shows.
 
-    blocked      the sandbox refused it (EPERM or EACCES)
+    blocked      the boundary refused it (EPERM or EACCES from the macOS
+                 sandbox, ENETUNREACH in the Linux network namespace)
     connected    connect() succeeded at once
     in-progress  a non-blocking connect() started and was not refused; its
                  completion is not observed

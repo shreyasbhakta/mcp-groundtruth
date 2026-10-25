@@ -1,8 +1,10 @@
 """Network observation, unit level: events, policies, capture, verdicts, configuration."""
 
 import asyncio
+import errno
 import json
 import socket
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,13 +78,13 @@ def test_read_log_counts_malformed_lines_and_notices_a_missing_file(tmp_path):
 @pytest.mark.parametrize(
     ("event", "expected"),
     [
-        (raw("connect", rc=-1, errno=1), "blocked"),  # EPERM: the sandbox refused
-        (raw("connect", rc=-1, errno=13), "blocked"),  # EACCES
+        (raw("connect", rc=-1, errno=errno.EPERM), "blocked"),  # the macOS sandbox refused
+        (raw("connect", rc=-1, errno=errno.EACCES), "blocked"),
+        (raw("connect", rc=-1, errno=errno.ENETUNREACH), "blocked"),  # the empty Linux namespace
         (raw("connect", rc=0, errno=0), "connected"),
-        (raw("connect", rc=-1, errno=36), "in-progress"),  # EINPROGRESS (macOS)
-        (raw("connect", rc=-1, errno=115), "in-progress"),  # EINPROGRESS (Linux)
-        (raw("connect", rc=-1, errno=61), "failed"),  # ECONNREFUSED
-        (raw("send", rc=-1, errno=36), "failed"),
+        (raw("connect", rc=-1, errno=errno.EINPROGRESS), "in-progress"),
+        (raw("connect", rc=-1, errno=errno.ECONNREFUSED), "failed"),
+        (raw("send", rc=-1, errno=errno.EINPROGRESS), "failed"),
         (raw("send", rc=5, errno=0), "sent"),
         (raw("resolve", rc=0), "resolved"),
         (raw("resolve", rc=8), "failed"),
@@ -399,12 +401,75 @@ def test_profile_allows_only_the_listed_loopback_ports_and_log_directory(tmp_pat
     assert "localhost:5556" not in sandbox._profile(tmp_path / "state")
 
 
-def test_linux_namespaces_refuse_a_loopback_exception(monkeypatch, tmp_path):
+def test_linux_namespaces_reach_the_capture_port_only_through_the_relay(monkeypatch, tmp_path):
     monkeypatch.setattr(
         sandbox, "isolation", lambda: sandbox.Isolation("unshare --net --map-root-user", "denied", "not confined")
     )
-    with pytest.raises(sandbox.IsolationUnavailable, match="capture endpoint"):
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    with pytest.raises(sandbox.IsolationUnavailable, match="only through the relay"):
         sandbox.isolated(["true"], tmp_path, loopback_ports=[5555])
+    argv = sandbox.isolated(["server"], tmp_path, loopback_ports=[5555], relay_socket="/tmp/c.sock")
+    assert argv[1:3] == ["--net", "--map-root-user"]
+    assert argv[3:] == [
+        sys.executable,
+        "-m",
+        "mcpgt.nsrelay",
+        "--port",
+        "5555",
+        "--unix",
+        "/tmp/c.sock",
+        "--",
+        "server",
+    ]
+
+
+RELAY_CLIENT = """
+import socket, sys, time
+port, canary = int(sys.argv[1]), sys.argv[2]
+for _ in range(100):
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=2)
+        break
+    except OSError:
+        time.sleep(0.05)
+head = b"POST http://collector.invalid/x HTTP/1.1\\r\\nContent-Length: %d\\r\\n\\r\\n" % len(canary)
+s.sendall(head + canary.encode())
+print(s.recv(100).split(b" ")[1].decode())
+sys.exit(3)
+"""
+
+
+def test_relay_copies_connections_to_the_capture_socket(tmp_path):
+    """The Linux relay, outside a namespace: a client, the relay, and the capture endpoint."""
+    import subprocess
+    import tempfile
+
+    port = free_port()
+    sock_dir = tempfile.mkdtemp(prefix="mcpgt-")
+    unix = str(Path(sock_dir) / "c.sock")
+    client = tmp_path / "client.py"
+    client.write_text(RELAY_CLIENT)
+
+    async def scenario():
+        async with capture.CaptureServer(CANARY, unix) as cap:
+            argv = [sys.executable, "-m", "mcpgt.nsrelay", "--port", str(port), "--unix", unix, "--no-loopback-setup"]
+            command = [sys.executable, str(client), str(port), CANARY]
+            proc = await asyncio.create_subprocess_exec(*argv, "--", *command, stdout=subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), 30)
+            await asyncio.sleep(0.1)
+            return proc.returncode, out.decode().strip(), list(cap.events)
+
+    code, status, events = asyncio.run(scenario())
+    assert code == 3  # the server's exit code passes through the relay
+    assert status == "204"  # the capture endpoint answered through the relay
+    (event,) = events
+    assert event.canary and event.host == "collector.invalid" and event.peer_port == 0
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
 
 def test_fixture_destinations_are_reserved_never_public():

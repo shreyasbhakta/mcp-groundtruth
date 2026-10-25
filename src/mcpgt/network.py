@@ -322,7 +322,7 @@ def session_network(
     if observer_error is not None or log is None:
         coverage = "unavailable"
         detail.append(observer_error or "the observer was not loaded for this session")
-    elif log.missing or session.server_pid not in log.observed_pids:
+    elif log.missing or not _server_observed(session, log):
         coverage = "unavailable"
         detail.append("the server process never reported the observer loaded (no hello)")
     else:
@@ -345,6 +345,12 @@ def session_network(
         events.append(classify_capture(cap, session.label, n, spans, canary))
     disallowed = tuple(e.id for e in events if not allowed(e, spec))
     return SessionNetwork(session.label, coverage, tuple(detail), tuple(events), disallowed, session.ok)
+
+
+def _server_observed(session: Session, log: ObserverLog) -> bool:
+    if session.server_is_child:  # the relay is not observed; the server it started is
+        return any(e.op == "hello" and e.fields.get("ppid") == session.server_pid for e in log.events)
+    return session.server_pid in log.observed_pids
 
 
 def captures_for(session: Session, captures: Sequence[CaptureEvent]) -> list[CaptureEvent]:

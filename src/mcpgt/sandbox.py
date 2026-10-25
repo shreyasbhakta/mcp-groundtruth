@@ -86,23 +86,28 @@ def isolated(
     state_dir: Path,
     extra_writable: Sequence[Path] = (),
     loopback_ports: Sequence[int] = (),
+    relay_socket: str | None = None,
 ) -> list[str]:
     """``command`` wrapped so it runs without network (and, on macOS, can only write under ``state_dir``).
 
     ``extra_writable`` adds directories it may write (the observer's logs), and
     ``loopback_ports`` the 127.0.0.1 ports it may connect to (the local capture
     endpoint). A Linux network namespace cannot reach a port on the host's
-    loopback, so asking for one there is IsolationUnavailable, not a silent
+    loopback: there, the one allowed port is served inside the namespace by
+    ``mcpgt.nsrelay``, which forwards to ``relay_socket``. Without a relay
+    socket, asking for a port on Linux is IsolationUnavailable, not a silent
     widening.
     """
     mechanism = isolation().mechanism
     if mechanism == "sandbox-exec":
         return [SANDBOX_EXEC, "-p", _profile(state_dir, extra_writable, loopback_ports), *command]
-    if loopback_ports:
+    if loopback_ports and (relay_socket is None or len(loopback_ports) != 1):
         raise IsolationUnavailable(
-            "a local capture endpoint is not reachable from a Linux network namespace; "
-            "set [network].capture = false, or run on macOS"
+            "a local capture endpoint is reachable from a Linux network namespace only through the relay"
         )
+    if loopback_ports:
+        relay = [sys.executable, "-m", "mcpgt.nsrelay", "--port", str(loopback_ports[0]), "--unix", str(relay_socket)]
+        command = [*relay, "--", *command]
     unshare = shutil.which("unshare")
     assert unshare is not None
     return [unshare, "--net", "--map-root-user", *command]

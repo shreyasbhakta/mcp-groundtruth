@@ -20,12 +20,15 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mcpgt import nsrelay
 from mcpgt import observer as observers
 from mcpgt.capture import CaptureEvent, CaptureServer
 from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
@@ -177,6 +180,7 @@ class Launch:
     node: NodeRuntime | None = None
     netobs_dir: Path | None = None  # per-session observer logs go here; None: not observed
     canary: str | None = None
+    observed_child: bool = False  # the server runs as the child of a relay (Linux capture)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +192,7 @@ class NetworkSetup:
     log_dir: Path
     canary: str | None
     capture: CaptureServer | None
+    relay_socket: str | None = None  # Linux: the capture endpoint's Unix socket
 
 
 def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None = None) -> Launch:
@@ -210,6 +215,7 @@ def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None =
     writable: list[Path] = []
     ports: list[int] = []
     netobs_dir = None
+    relay = network is not None and network.capture is not None and iso.mechanism != "sandbox-exec"
     if network is not None:
         network.log_dir.mkdir(parents=True, exist_ok=True)
         writable.append(network.log_dir)
@@ -217,6 +223,9 @@ def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None =
             netobs_dir = network.log_dir
             command = [*network.observer.command_prefix(), *command]
             env.update(network.observer.environment(network.log_dir / "unassigned.jsonl", canary))
+            if relay and "LD_PRELOAD" in env:
+                # The relay itself must not be observed; it hands the observer to the server.
+                env[nsrelay.PRELOAD_ENV] = env.pop("LD_PRELOAD")
         if network.capture is not None:
             ports.append(network.capture.port)
             url = network.capture.url
@@ -232,7 +241,7 @@ def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None =
     # Targets run with the state directory as working directory, so relative
     # writes land in observed state rather than in the target definition.
     return Launch(
-        tuple(isolated(command, state_dir, writable, ports)),
+        tuple(isolated(command, state_dir, writable, ports, network.relay_socket if relay and network else None)),
         env,
         state_dir.resolve(),
         iso,
@@ -240,6 +249,7 @@ def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None =
         node,
         netobs_dir,
         canary,
+        observed_child=relay,
     )
 
 
@@ -272,6 +282,7 @@ class Session:
     after: State | None = None  # after the server exited
     stderr: str = ""
     server_pid: int | None = None
+    server_is_child: bool = False  # server_pid is a relay; the server is its observed child
     window: tuple[int, int] | None = None  # wall clock (ns) from server start to exit
     call_spans: tuple[tuple[int, int], ...] = ()  # wall clock (ns) each call was in flight
     network: observers.ObserverLog | None = None  # observer log; None if not observed
@@ -368,6 +379,7 @@ async def run_session(
         after=after,
         stderr=client.stderr,
         server_pid=client.pid,
+        server_is_child=launch is not None and launch.observed_child,
         window=(started, ended),
         call_spans=tuple(spans),
         network=None if log is None else observers.read_log(log),
@@ -479,8 +491,12 @@ async def run_fixture(
         observer, observer_error = None, str(exc)
     canary = f"mcpgt-canary-{secrets.token_hex(8)}" if spec.canary else None
     async with contextlib.AsyncExitStack() as stack:
-        capture = await stack.enter_async_context(CaptureServer(canary)) if spec.capture else None
-        setup = NetworkSetup(observer, observer_error, work_dir / "netobs", canary, capture)
+        relay_socket = None
+        if spec.capture and sys.platform != "darwin":
+            # A short path: Unix socket paths are limited to about 100 bytes.
+            relay_socket = str(Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="mcpgt-"))) / "c.sock")
+        capture = await stack.enter_async_context(CaptureServer(canary, relay_socket)) if spec.capture else None
+        setup = NetworkSetup(observer, observer_error, work_dir / "netobs", canary, capture, relay_socket)
         run = await _run_fixture(fixture, work_dir, runs, only_tools, concurrent_attempts, observe_concurrent, setup)
         captures = tuple(capture.events) if capture is not None else ()
     return dataclasses.replace(

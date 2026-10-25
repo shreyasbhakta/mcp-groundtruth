@@ -9,7 +9,6 @@ the capture endpoint's lifetime, and gating CI on a network VIOLATION.
 import asyncio
 import json
 import socket
-import sys
 from pathlib import Path
 
 import pytest
@@ -26,14 +25,15 @@ from mcpgt.verdict import derive
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "network-side-effects"
 
 
-def macos_sandbox() -> bool:
+def sandbox_available() -> bool:
     try:
-        return sys.platform == "darwin" and isolation().mechanism == "sandbox-exec"
+        isolation()
     except IsolationUnavailable:
         return False
+    return True
 
 
-needs_macos_sandbox = pytest.mark.skipif(not macos_sandbox(), reason="the capture endpoint needs the macOS sandbox")
+needs_sandbox = pytest.mark.skipif(not sandbox_available(), reason="no network isolation on this host")
 
 
 def quick(tmp_path, *tools):
@@ -53,7 +53,7 @@ def test_without_isolation_the_server_is_never_started(tmp_path, monkeypatch, ca
     assert started == [] and not (tmp_path / "runs").exists()
 
 
-@needs_macos_sandbox
+@needs_sandbox
 def test_unavailable_observer_makes_every_network_verdict_inconclusive(tmp_path, monkeypatch):
     def no_observer(*args, **kwargs):
         raise observers.ObserverUnavailable("no C compiler (test)")
@@ -72,7 +72,7 @@ def test_unavailable_observer_makes_every_network_verdict_inconclusive(tmp_path,
     assert run.network is not None and run.network.observer_error == "no C compiler (test)"
 
 
-@needs_macos_sandbox
+@needs_sandbox
 def test_report_evidence_for_a_blocked_attempt_and_a_transmission(tmp_path):
     run = quick(tmp_path, "read_note_and_beacon", "read_note_and_upload")
     report = reports.build(run, derive(run), "net-test", audit=True)
@@ -97,7 +97,7 @@ def test_report_evidence_for_a_blocked_attempt_and_a_transmission(tmp_path):
     assert "network: policy deny" in reports.render_text(report)
 
 
-@needs_macos_sandbox
+@needs_sandbox
 def test_capture_endpoint_is_closed_when_the_run_ends(tmp_path):
     run = quick(tmp_path, "read_note")
     assert run.network is not None and run.network.capture_port
@@ -105,7 +105,7 @@ def test_capture_endpoint_is_closed_when_the_run_ends(tmp_path):
         socket.create_connection(("127.0.0.1", run.network.capture_port), timeout=1)
 
 
-@needs_macos_sandbox
+@needs_sandbox
 def test_fail_on_violation_counts_network_violations(tmp_path, capsys):
     args = ["run", str(FIXTURE), "--audit", "--tool", "read_note_and_lookup", "--concurrent-attempts", "1"]
     args += ["--runs-dir", str(tmp_path / "runs")]
