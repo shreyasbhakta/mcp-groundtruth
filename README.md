@@ -373,8 +373,8 @@ capture = true
 
 An attempt and a transmission are reported separately. Missing or partial
 observation is INCONCLUSIVE, never PASS, and without a sandbox the run
-refuses to start. macOS is fully supported. On Linux the network is blocked
-and attempts are observed, but there is no capture endpoint. Details,
+refuses to start. It runs on macOS and on Linux (with unprivileged user
+namespaces); both are tested end to end in CI. Details,
 configuration, guarantees and gaps:
 [docs/network.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/network.md).
 
@@ -420,7 +420,7 @@ about other servers or other versions of these.
   that loaded the observer. Raw system calls, statically linked binaries and
   unobserved children are not seen; unobserved children are reported as
   coverage gaps. A server written to evade it can, but it cannot evade the
-  sandbox. The capture endpoint is macOS only. See
+  sandbox. See
   [docs/network.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/network.md#known-gaps).
 - **State in SQLite, files or JSON only.** Observation covers SQLite
   databases, files and directory trees, and JSON or JSON Lines files.

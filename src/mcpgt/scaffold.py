@@ -277,7 +277,7 @@ def render(
         "# Guide: https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/network.md",
         "# [network]",
         '# policy = "deny"    # deny | allowlist (with allow = ["host:port"]) | permitted',
-        "# capture = true     # a local endpoint that records requests and forwards nothing (macOS)",
+        "# capture = true     # a local endpoint that records requests and forwards nothing",
         "",
         "# --- Tools --------------------------------------------------------------",
         "# One [[tools]] entry per argument set. Choose arguments that do real work",

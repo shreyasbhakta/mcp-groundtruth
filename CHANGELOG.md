@@ -20,6 +20,9 @@ All notable changes to this project are documented here. The format follows
   - a synthetic canary (`$MCPGT_CANARY`, `{canary}`) shows whether planted
     data left.
 
+  Supported on macOS (`sandbox-exec`, `DYLD_INSERT_LIBRARIES`) and Linux
+  (`unshare --net`, `LD_PRELOAD`, and a relay inside the namespace that
+  carries capture connections to the harness over a Unix socket).
   VIOLATION needs a disallowed interaction in every run. Unavailable or
   partial observation is INCONCLUSIVE, and a definition with `[network]`
   refuses to run without a sandbox. `--fail-on-violation` counts network

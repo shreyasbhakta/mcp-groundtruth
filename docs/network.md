@@ -33,7 +33,7 @@ Add a `[network]` section to a fixture or target definition:
 ```toml
 [network]
 policy = "deny"   # no tool may reach the network
-capture = true    # run the local capture endpoint (macOS)
+capture = true    # run the local capture endpoint
 canary = true     # plant a synthetic secret for this run (the default)
 ```
 
@@ -215,11 +215,16 @@ directory or as `~/…`.
 
 | | macOS | Linux |
 |---|---|---|
-| Network boundary | `sandbox-exec`: all network denied; the capture port is the only exception | `unshare --net`: an empty network namespace |
+| Network boundary | `sandbox-exec`: all network denied; the capture port is the only exception | `unshare --net`: an empty network namespace; nothing outside it is reachable |
 | File writes | confined to the state directory and the observer's log directory | not confined |
 | Observer | `DYLD_INSERT_LIBRARIES` (needs a server binary that allows it; the official Node and Homebrew Python builds do) | `LD_PRELOAD` |
-| Capture endpoint | yes | **no**: a network namespace cannot reach the host's loopback, so `capture = true` refuses to run |
-| Verified in this repository | end to end, by the fixture and its tests | the observer, unsandboxed against closed loopback ports; the sandboxed run is not yet exercised in CI |
+| A blocked attempt | `EPERM` from the sandbox | `ENETUNREACH`: the namespace has no route anywhere |
+| Capture endpoint | the harness's listener on 127.0.0.1 | a relay (`mcpgt.nsrelay`) inside the namespace serves the capture port and copies each connection to the harness over a Unix socket; the relay itself is not observed |
+| Verified in this repository | end to end, by the fixture and its tests | end to end in CI (GitHub-hosted Ubuntu, with unprivileged user namespaces allowed) |
+
+Linux needs unprivileged user namespaces. Ubuntu 24.04 restricts them; see the
+warning in [your-server.md](your-server.md#7-gate-releases-in-ci) before
+lifting that anywhere but an ephemeral CI runner.
 
 If no sandbox is available, a definition with `[network]` refuses to run
 (exit code 2), and no server is started. There is no fallback to
