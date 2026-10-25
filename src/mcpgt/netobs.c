@@ -21,7 +21,8 @@
  * appear as exec events without a matching hello), and on macOS any program
  * the system refuses to inject into (system binaries such as /bin/sh).
  */
-#define _GNU_SOURCE
+/* No _GNU_SOURCE: with it, glibc declares connect() and friends with a
+ * transparent-union address type that the definitions below would not match. */
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -174,7 +175,7 @@ __attribute__((constructor)) static void mcpgt_hello(void) {
     emit(line);
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(MCPGT_PRELOAD_STYLE)
 /* dyld interposing: calls from every other image are redirected here, and a
  * call to the original name inside this file reaches the real function. */
 
@@ -247,12 +248,19 @@ __attribute__((used)) static const struct {
 };
 
 #else
-/* LD_PRELOAD: these definitions shadow libc's; the real ones come from RTLD_NEXT. */
+/* LD_PRELOAD: these definitions shadow libc's; the real ones come from RTLD_NEXT.
+ * (MCPGT_PRELOAD_STYLE compiles this branch on macOS too, to check its syntax.) */
 
-#define REAL(name, type) static type real_##name = NULL; if (real_##name == NULL) real_##name = (type)dlsym(RTLD_NEXT, #name)
+#ifndef RTLD_NEXT
+#define RTLD_NEXT ((void *)-1L) /* glibc and musl; dlfcn.h only defines it under _GNU_SOURCE */
+#endif
+
+#define REAL(name)                                                                  \
+    static __typeof__(name) *real_##name = NULL;                                    \
+    if (real_##name == NULL) *(void **)(&real_##name) = dlsym(RTLD_NEXT, #name)
 
 int connect(int fd, const struct sockaddr *sa, socklen_t len) {
-    REAL(connect, int (*)(int, const struct sockaddr *, socklen_t));
+    REAL(connect);
     int rc = real_connect(fd, sa, len), err = errno;
     log_connect(fd, sa, len, rc, err);
     errno = err;
@@ -260,7 +268,7 @@ int connect(int fd, const struct sockaddr *sa, socklen_t len) {
 }
 
 ssize_t sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr *sa, socklen_t len) {
-    REAL(sendto, ssize_t (*)(int, const void *, size_t, int, const struct sockaddr *, socklen_t));
+    REAL(sendto);
     ssize_t rc = real_sendto(fd, buf, n, flags, sa, len);
     int err = errno;
     if (sa != NULL) log_send(fd, sa, len, n, has_canary(buf, n), rc, err);
@@ -269,7 +277,7 @@ ssize_t sendto(int fd, const void *buf, size_t n, int flags, const struct sockad
 }
 
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
-    REAL(sendmsg, ssize_t (*)(int, const struct msghdr *, int));
+    REAL(sendmsg);
     ssize_t rc = real_sendmsg(fd, msg, flags);
     int err = errno;
     if (msg != NULL && msg->msg_name != NULL)
@@ -279,7 +287,7 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
 }
 
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
-    REAL(getaddrinfo, int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **));
+    REAL(getaddrinfo);
     int rc = real_getaddrinfo(node, service, hints, res), err = errno;
     log_resolve(node, rc);
     errno = err;
@@ -287,15 +295,14 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
 }
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    REAL(execve, int (*)(const char *, char *const[], char *const[]));
+    REAL(execve);
     log_exec("execve", path, (int)getpid(), 0);
     return real_execve(path, argv, envp);
 }
 
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa, const posix_spawnattr_t *attr,
                 char *const argv[], char *const envp[]) {
-    REAL(posix_spawn, int (*)(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *,
-                              char *const[], char *const[]));
+    REAL(posix_spawn);
     pid_t child = 0;
     int rc = real_posix_spawn(&child, path, fa, attr, argv, envp);
     if (pid != NULL) *pid = child;
@@ -305,8 +312,7 @@ int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *
 
 int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa, const posix_spawnattr_t *attr,
                  char *const argv[], char *const envp[]) {
-    REAL(posix_spawnp, int (*)(pid_t *, const char *, const posix_spawn_file_actions_t *,
-                               const posix_spawnattr_t *, char *const[], char *const[]));
+    REAL(posix_spawnp);
     pid_t child = 0;
     int rc = real_posix_spawnp(&child, file, fa, attr, argv, envp);
     if (pid != NULL) *pid = child;
