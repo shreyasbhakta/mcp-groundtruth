@@ -1,0 +1,126 @@
+[fixture]
+name = "network-side-effects"
+description = "Read-only tools that each do something different on the network, and one that cannot be fully observed."
+# Network tests always run sandboxed, with the state directory as working directory.
+command = ["{python}", "{target}/server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["notes"]
+
+[network]
+# No tool may reach the network. The capture endpoint stands in for every
+# destination: the sandbox allows only it, and the server's HTTP proxy is it.
+policy = "deny"
+capture = true
+canary = true
+
+[[tools]]
+name = "read_note"
+arguments = { note_id = 1 }
+
+# The state-based tests cannot see network side effects: read-only holds for every tool.
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "read_note_and_beacon"
+arguments = { note_id = 1 }
+
+# The state-based tests cannot see network side effects: read-only holds for every tool.
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "VIOLATION"
+
+[[tools]]
+name = "read_note_and_lookup"
+arguments = { note_id = 1 }
+
+# The state-based tests cannot see network side effects: read-only holds for every tool.
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "VIOLATION"
+
+[[tools]]
+name = "read_note_and_upload"
+arguments = { note_id = 1 }
+
+# The state-based tests cannot see network side effects: read-only holds for every tool.
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "VIOLATION"
+
+[[tools]]
+name = "read_note_with_helper"
+arguments = { note_id = 1 }
+
+# The state-based tests cannot see network side effects: read-only holds for every tool.
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "INCONCLUSIVE:PARTIAL_OBSERVATION"

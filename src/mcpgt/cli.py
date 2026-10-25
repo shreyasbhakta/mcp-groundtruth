@@ -207,7 +207,7 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
                     observe_concurrent=args.observe_concurrent,
                 )
             )
-    except (ValueError, SourceError, IsolationUnavailable) as exc:
+    except (ValueError, SourceError, IsolationUnavailable, fixtures.FixtureError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     report = reports.build(run, derive(run), reports.new_run_id(fx), audit=args.audit)
@@ -217,9 +217,12 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
     violations = [
         f"{tool['tool']} {verdict['test']}"
         for tool in report["tools"]
-        for verdict in tool["verdicts"]
+        for verdict in [*tool["verdicts"], *([tool["network"]] if "network" in tool else [])]
         if verdict["outcome"] == Outcome.VIOLATION.value
     ]
+    lifecycle = (report.get("network") or {}).get("lifecycle")
+    if lifecycle and lifecycle["outcome"] == Outcome.VIOLATION.value:
+        violations.append("server lifecycle network")
     if args.fail_on_violation and violations:
         print(f"failing: {len(violations)} VIOLATION verdict(s): {', '.join(violations)}", file=sys.stderr)
         return EXIT_UNEXPECTED

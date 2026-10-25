@@ -17,6 +17,7 @@ from typing import Any
 
 import mcpgt
 from mcpgt.fixture import Expectation, Fixture
+from mcpgt.network import NetworkVerdict, derive_network
 from mcpgt.provenance import (
     CaptureProvenance,
     SourceProvenance,
@@ -134,6 +135,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
     checked = matched = 0
     mismatches: list[dict[str, Any]] = []
     not_run: list[str] = []
+    network = {v.tool: v for v in derive_network(run)}
     for ev in run.tools:
         tool_verdicts = []
         for v in (v for v in verdicts if v.tool == ev.tool):
@@ -149,6 +151,16 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
             tool_verdicts.append(entry)
         if not audit:
             not_run += [f"{ev.tool}/{t.value}" for t in specs[ev.tool].expected if t not in IMPLEMENTED]
+        net = network.get(ev.tool)
+        net_entry = None if net is None else net.to_json()
+        want = specs[ev.tool].expected_network
+        if net is not None and net_entry is not None and want is not None and not audit:
+            problems = network_check(net, want)
+            checked += 1
+            matched += not problems
+            net_entry["expected"] = {"problems": problems, "matched": not problems}
+            if problems:
+                mismatches.append({"tool": ev.tool, "test": "network", "problems": problems})
         tools.append(
             {
                 "tool": ev.tool,
@@ -161,6 +173,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
                 "sessions": [s.to_json() for s in ev.once + ev.twice],
                 "concurrent_sessions": [r.to_json() for r in ev.concurrent_raw],
                 "verdicts": tool_verdicts,
+                **({"network": net_entry} if net_entry is not None else {}),
             }
         )
     return {
@@ -190,6 +203,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
             "errors": list(run.listing_errors),
             "listings": [{"sessions": list(r.sessions), **r.listing.to_json()} for r in run.listings],
         },
+        "network": _network_block(run, network),
         "tools": tools,
         "untested_tools": list(run.untested_tools),
         "expectations": {
@@ -199,6 +213,32 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
             "mismatches": mismatches,
             "not_run": not_run,
         },
+    }
+
+
+def network_check(verdict: NetworkVerdict, want: tuple[Outcome, Any]) -> list[str]:
+    outcome, reason = want
+    if verdict.outcome is outcome and verdict.reason is reason:
+        return []
+    got = verdict.outcome.value + (f":{verdict.reason.value}" if verdict.reason else "")
+    exp = outcome.value + (f":{reason.value}" if reason else "")
+    return [f"network verdict {got}, expected {exp}"]
+
+
+def _network_block(run: FixtureRun, verdicts: dict[str, NetworkVerdict]) -> dict[str, Any] | None:
+    """Run-level network evidence: the setup, the server lifecycle, and the capture endpoint."""
+    spec, net = run.fixture.network, run.network
+    if spec is None or net is None:
+        return None
+    lifecycle = verdicts.get("(server lifecycle)")
+    return {
+        "policy": spec.to_json(),
+        "observer": net.observer,
+        "observer_error": net.observer_error,
+        "canary": net.canary,
+        "capture_endpoint": None if net.capture_port is None else f"127.0.0.1:{net.capture_port}",
+        "captured_connections": len(net.captures),
+        "lifecycle": None if lifecycle is None else lifecycle.to_json(),
     }
 
 
@@ -273,6 +313,9 @@ def render_text(report: dict[str, Any]) -> str:
                         )
                 by = ", ".join(conc["produced_by"]) or "-"
                 lines.append(f"  {'':<20}   attempts: {'; '.join(parts)}; produced by: {by}")
+    net = report.get("network")
+    if net:
+        lines += _render_network(report, net)
     exp = report["expectations"]
     lines.append("")
     if audit:
@@ -286,3 +329,29 @@ def render_text(report: dict[str, Any]) -> str:
     if report["untested_tools"]:
         lines.append(f"  listed but untested (no arguments configured): {', '.join(report['untested_tools'])}")
     return "\n".join(lines)
+
+
+def _render_network(report: dict[str, Any], net: dict[str, Any]) -> list[str]:
+    observer = net["observer"]["mechanism"] if net["observer"] else f"UNAVAILABLE ({net['observer_error']})"
+    capture = net["capture_endpoint"] or "off"
+    policy = net["policy"]
+    allow = f" allow {', '.join(policy['allow'])}" if policy["allow"] else ""
+    lines = [
+        "",
+        f"  network: policy {policy['policy']}{allow}; observer {observer}; capture endpoint {capture}",
+        f"  {'tool':<26} {'verdict':<38} {'attempted':>9} {'blocked':>8} {'sent':>5} {'canary':>7}  destinations",
+    ]
+    rows = [net["lifecycle"]] if net["lifecycle"] else []
+    rows += [t["network"] for t in report["tools"] if "network" in t]
+    for v in rows:
+        verdict = v["outcome"] + (f":{v['reason']}" if v["reason"] else "")
+        exp = v.get("expected")
+        mark = "" if exp is None else ("  ok" if exp["matched"] else "  MISMATCH")
+        s = v["summary"]
+        lines.append(
+            f"  {v['tool']:<26} {verdict:<38} {s['attempted']:>9} {s['blocked']:>8} {s['transmitted']:>5} "
+            f"{'yes' if s['canary_seen'] else 'no':>7}  {', '.join(s['destinations']) or '-'}{mark}"
+        )
+        if v["outcome"] != "PASS":
+            lines.append(f"  {'':<26}   {v['detail']}")
+    return lines

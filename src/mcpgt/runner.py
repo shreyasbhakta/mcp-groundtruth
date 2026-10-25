@@ -12,9 +12,12 @@ Evidence only; verdict.py interprets it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
+import re
+import secrets
 import shutil
 import sqlite3
 import time
@@ -23,8 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mcpgt import observer as observers
+from mcpgt.capture import CaptureEvent, CaptureServer
 from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
-from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec
+from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec, expand_arguments
 from mcpgt.normalize import NormalizationError
 from mcpgt.sandbox import Isolation, isolated, isolation
 from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, StateCategory, diff
@@ -170,26 +175,72 @@ class Launch:
     isolation: Isolation | None
     source: PreparedSource | None
     node: NodeRuntime | None = None
+    netobs_dir: Path | None = None  # per-session observer logs go here; None: not observed
+    canary: str | None = None
 
 
-def launch_for(fixture: Fixture, state_dir: Path) -> Launch:
+@dataclass(frozen=True, slots=True)
+class NetworkSetup:
+    """What a run with a [network] section prepared before any server starts."""
+
+    observer: observers.Observer | None
+    observer_error: str | None  # why there is no observer
+    log_dir: Path
+    canary: str | None
+    capture: CaptureServer | None
+
+
+def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None = None) -> Launch:
     """Resolve the server command. For targets, first verify the pinned source
     (SourceError) and the sandbox (IsolationUnavailable): a target never runs
-    from an unverified checkout or with network access."""
+    from an unverified checkout or with network access. Neither does anything
+    whose network behavior is tested."""
     node = None if fixture.node is None else node_runtime(fixture.node)
     source = verify_source(fixture.source, node_major=fixture.node) if fixture.source is not None else None
     source_path = None if source is None else source.path
-    command = fixture.server_command(source_path, state_dir)
+    canary = None if network is None else network.canary
+    command = fixture.server_command(source_path, state_dir, canary)
     if node is not None:
         # Run exactly the Node binary whose version was checked.
         command = [node.path if part == "node" else part for part in command]
-    env = {**server_env(state_dir), **fixture.server_env(state_dir, source_path)}
+    env = {**server_env(state_dir), **fixture.server_env(state_dir, source_path, canary)}
     if not fixture.isolated:
         return Launch(tuple(command), env, fixture.root, None, source, node)
     iso = isolation()
+    writable: list[Path] = []
+    ports: list[int] = []
+    netobs_dir = None
+    if network is not None:
+        network.log_dir.mkdir(parents=True, exist_ok=True)
+        writable.append(network.log_dir)
+        if network.observer is not None:
+            netobs_dir = network.log_dir
+            command = [*network.observer.command_prefix(), *command]
+            env.update(network.observer.environment(network.log_dir / "unassigned.jsonl", canary))
+        if network.capture is not None:
+            ports.append(network.capture.port)
+            url = network.capture.url
+            env["MCPGT_CAPTURE_URL"] = url
+            # Proxy-aware clients send every request to the capture endpoint,
+            # which records the destination they asked for and forwards nothing.
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+                env[key] = url
+            env["NO_PROXY"] = env["no_proxy"] = ""
+            env["NODE_USE_ENV_PROXY"] = "1"
+        elif canary is not None:
+            env[observers.CANARY_ENV] = canary
     # Targets run with the state directory as working directory, so relative
     # writes land in observed state rather than in the target definition.
-    return Launch(tuple(isolated(command, state_dir)), env, state_dir.resolve(), iso, source, node)
+    return Launch(
+        tuple(isolated(command, state_dir, writable, ports)),
+        env,
+        state_dir.resolve(),
+        iso,
+        source,
+        node,
+        netobs_dir,
+        canary,
+    )
 
 
 async def start_server(
@@ -220,6 +271,10 @@ class Session:
     before: State | None = None  # right after reset
     after: State | None = None  # after the server exited
     stderr: str = ""
+    server_pid: int | None = None
+    window: tuple[int, int] | None = None  # wall clock (ns) from server start to exit
+    call_spans: tuple[tuple[int, int], ...] = ()  # wall clock (ns) each call was in flight
+    network: observers.ObserverLog | None = None  # observer log; None if not observed
 
     @property
     def transport_error(self) -> str | None:
@@ -261,10 +316,18 @@ async def run_session(
         before = observe(fixture, state_dir)
     except SetupError as exc:
         return Session(label, names, setup_error=str(exc))
+    log = None
+    if launch is not None and launch.netobs_dir is not None:
+        log = launch.netobs_dir / (re.sub(r"[^A-Za-z0-9._-]+", "_", label) + ".jsonl")
+        log.unlink(missing_ok=True)
+        launch = dataclasses.replace(launch, env={**launch.env, observers.LOG_ENV: str(log.resolve())})
+    started = time.time_ns()
     try:
         client = await start_server(fixture, state_dir, launch=launch)
     except (WireError, OSError) as exc:
         return Session(label, names, setup_error=f"server did not start: {exc}", before=before)
+    spans: list[tuple[int, int]] = []
+    canary = None if launch is None else launch.canary
 
     initialize_text = client.initialize_response.text if client.initialize_response else None
     pages: list[RawResponse] = []
@@ -276,7 +339,9 @@ async def run_session(
             setup_error = f"tools/list failed: {pages[-1].text[:500]}"
         else:
             for call in calls:
-                responses.append(await client.call_tool(call.name, call.arguments))
+                t0 = time.time_ns()
+                responses.append(await client.call_tool(call.name, expand_arguments(call.arguments, canary)))
+                spans.append((t0, time.time_ns()))
     except WireError as exc:
         if pages and not setup_error:
             wire_error = str(exc)
@@ -284,6 +349,7 @@ async def run_session(
             setup_error = f"tools/list failed: {exc}"
     finally:
         await client.close()
+    ended = time.time_ns()
 
     try:
         after = observe(fixture, state_dir)
@@ -301,6 +367,10 @@ async def run_session(
         before=before,
         after=after,
         stderr=client.stderr,
+        server_pid=client.pid,
+        window=(started, ended),
+        call_spans=tuple(spans),
+        network=None if log is None else observers.read_log(log),
     )
 
 
@@ -343,6 +413,17 @@ class ListingRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkRun:
+    """Run-level network evidence: what was set up, and what reached the capture endpoint."""
+
+    observer: dict[str, str] | None
+    observer_error: str | None
+    canary: str | None
+    capture_port: int | None
+    captures: tuple[CaptureEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class FixtureRun:
     fixture: Fixture
     runs: int
@@ -357,6 +438,7 @@ class FixtureRun:
     tools: tuple[ToolEvidence, ...]
     untested_tools: tuple[str, ...] = field(default=())  # listed by the server, no ToolSpec
     launch: Launch | None = None
+    network: NetworkRun | None = None
 
     @property
     def control_stable(self) -> bool:
@@ -382,6 +464,46 @@ async def run_fixture(
     concurrent_attempts: int = CONCURRENT_ATTEMPTS,
     observe_concurrent: bool = False,
 ) -> FixtureRun:
+    """Run every test for every tool spec; see ``_run_fixture``.
+
+    With a [network] section, the observer is built and the capture endpoint
+    (if asked for) is opened first, and the endpoint is closed however the run
+    ends.
+    """
+    spec = fixture.network
+    if spec is None:
+        return await _run_fixture(fixture, work_dir, runs, only_tools, concurrent_attempts, observe_concurrent)
+    try:
+        observer, observer_error = observers.build(), None
+    except observers.ObserverUnavailable as exc:
+        observer, observer_error = None, str(exc)
+    canary = f"mcpgt-canary-{secrets.token_hex(8)}" if spec.canary else None
+    async with contextlib.AsyncExitStack() as stack:
+        capture = await stack.enter_async_context(CaptureServer(canary)) if spec.capture else None
+        setup = NetworkSetup(observer, observer_error, work_dir / "netobs", canary, capture)
+        run = await _run_fixture(fixture, work_dir, runs, only_tools, concurrent_attempts, observe_concurrent, setup)
+        captures = tuple(capture.events) if capture is not None else ()
+    return dataclasses.replace(
+        run,
+        network=NetworkRun(
+            observer=None if observer is None else observer.to_json(),
+            observer_error=observer_error,
+            canary=canary,
+            capture_port=None if capture is None else capture.port,
+            captures=captures,
+        ),
+    )
+
+
+async def _run_fixture(
+    fixture: Fixture,
+    work_dir: Path,
+    runs: int,
+    only_tools: Sequence[str] | None,
+    concurrent_attempts: int,
+    observe_concurrent: bool,
+    network: NetworkSetup | None = None,
+) -> FixtureRun:
     """Run every test for every tool spec.
 
     ``observe_concurrent`` also runs concurrent attempts for tools with no
@@ -396,7 +518,7 @@ async def run_fixture(
     if unknown:
         raise ValueError(f"{fixture.name} has no tool spec named {', '.join(sorted(unknown))}")
     state_dir = work_dir / "state"
-    launch = launch_for(fixture, state_dir)  # targets: verify pinned source and sandbox first
+    launch = launch_for(fixture, state_dir, network)  # targets: verify pinned source and sandbox first
     reset_result = verify_reset(fixture, state_dir)
     coverage = fixture.coverage(state_dir)
 
@@ -625,9 +747,11 @@ async def _ping_rtt(client: WireClient, pings: int = 3) -> float:
     return worst
 
 
-async def _timed_call(client: WireClient, spec: ToolSpec) -> tuple[RawResponse, tuple[float, float]]:
+async def _timed_call(
+    client: WireClient, spec: ToolSpec, canary: str | None = None
+) -> tuple[RawResponse, tuple[float, float]]:
     sent = time.monotonic()
-    response = await client.call_tool(spec.name, spec.arguments)
+    response = await client.call_tool(spec.name, expand_arguments(spec.arguments, canary))
     return response, (sent, time.monotonic())
 
 
@@ -666,7 +790,9 @@ async def run_concurrent(
                 rtts.append(await _ping_rtt(client))
             if setup_error is None:
                 pair = [clients[0], clients[0]] if instances == 1 else clients
-                for response, window in await asyncio.gather(*(_timed_call(c, spec) for c in pair)):
+                for response, window in await asyncio.gather(
+                    *(_timed_call(c, spec, None if launch is None else launch.canary) for c in pair)
+                ):
                     responses.append(response)
                     windows.append(window)
     except WireError as exc:

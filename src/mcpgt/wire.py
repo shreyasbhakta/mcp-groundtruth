@@ -80,6 +80,10 @@ class WireClient:
         return cls(process, timeout)
 
     @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
     def stderr(self) -> str:
         return self._stderr.decode("utf-8", "replace")
 

@@ -42,14 +42,21 @@ class Isolation:
         return {"mechanism": self.mechanism, "network": self.network, "file_writes": self.file_writes}
 
 
-def _profile(writable: Path) -> str:
-    root = str(writable.resolve()).replace('"', '\\"')
+def _quote(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _profile(writable: Path, extra_writable: Sequence[Path] = (), loopback_ports: Sequence[int] = ()) -> str:
+    subpaths = " ".join(f'(subpath "{_quote(p)}")' for p in (writable, *extra_writable))
+    # Later rules take precedence: each allowed port is an exception to deny network*.
+    ports = "".join(f'(allow network-outbound (remote ip "localhost:{int(p)}"))\n' for p in loopback_ports)
     return (
         "(version 1)\n"
         "(allow default)\n"
         "(deny network*)\n"
+        f"{ports}"
         "(deny file-write*)\n"
-        f'(allow file-write* (subpath "{root}") (literal "/dev/null") (literal "/dev/dtracehelper")'
+        f'(allow file-write* {subpaths} (literal "/dev/null") (literal "/dev/dtracehelper")'
         ' (regex #"^/dev/tty") (regex #"^/dev/fd/"))\n'
     )
 
@@ -74,11 +81,28 @@ def isolation() -> Isolation:
     )
 
 
-def isolated(command: Sequence[str], state_dir: Path) -> list[str]:
-    """``command`` wrapped so it runs without network (and, on macOS, can only write under ``state_dir``)."""
+def isolated(
+    command: Sequence[str],
+    state_dir: Path,
+    extra_writable: Sequence[Path] = (),
+    loopback_ports: Sequence[int] = (),
+) -> list[str]:
+    """``command`` wrapped so it runs without network (and, on macOS, can only write under ``state_dir``).
+
+    ``extra_writable`` adds directories it may write (the observer's logs), and
+    ``loopback_ports`` the 127.0.0.1 ports it may connect to (the local capture
+    endpoint). A Linux network namespace cannot reach a port on the host's
+    loopback, so asking for one there is IsolationUnavailable, not a silent
+    widening.
+    """
     mechanism = isolation().mechanism
     if mechanism == "sandbox-exec":
-        return [SANDBOX_EXEC, "-p", _profile(state_dir), *command]
+        return [SANDBOX_EXEC, "-p", _profile(state_dir, extra_writable, loopback_ports), *command]
+    if loopback_ports:
+        raise IsolationUnavailable(
+            "a local capture endpoint is not reachable from a Linux network namespace; "
+            "set [network].capture = false, or run on macOS"
+        )
     unshare = shutil.which("unshare")
     assert unshare is not None
     return [unshare, "--net", "--map-root-user", *command]

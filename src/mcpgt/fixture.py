@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mcpgt.network import COVERAGE, POLICIES, NetworkReason, NetworkSpec
 from mcpgt.normalize import MaskRule, Normalizer, VolatileKind
 from mcpgt.snapshot import (
     Classification,
@@ -36,7 +37,7 @@ from mcpgt.verdict import Behavior, Outcome, Reason, TestKind, parse_reason
 
 FIXTURES_DIR = Path("fixtures")
 TARGETS_DIR = Path("targets")
-_PLACEHOLDER = re.compile(r"\{(python|source|state|target)\}")
+_PLACEHOLDER = re.compile(r"\{(python|source|state|target|canary)\}")
 # Marks a value `mcpgt init` could not know. A definition holding one does not load.
 TODO_MARKER = "TODO(mcpgt)"
 
@@ -133,6 +134,7 @@ class ToolSpec:
     arguments: Mapping[str, Any]
     expected: Mapping[TestKind, Expectation]
     variant: str | None = None  # distinguishes several argument sets for one tool
+    expected_network: tuple[Outcome, NetworkReason | None] | None = None  # fixtures only
 
     @property
     def key(self) -> str:
@@ -172,6 +174,7 @@ class Fixture:
     source: SourceSpec | None = None
     env: Mapping[str, str] | None = None
     node: str | None = None  # required Node major version, for build and run
+    network: NetworkSpec | None = None  # observe network interactions against this policy
 
     @property
     def kind(self) -> str:
@@ -183,16 +186,21 @@ class Fixture:
 
     @property
     def isolated(self) -> bool:
-        """Targets always run without network; fixtures are this project's own code."""
-        return self.is_target
+        """Targets always run without network, and so does anything whose network
+        behavior is tested; other fixtures are this project's own code."""
+        return self.is_target or self.network is not None
 
-    def _expand(self, text: str, state_dir: Path | None, source: Path | None) -> str:
+    def _expand(self, text: str, state_dir: Path | None, source: Path | None, canary: str | None = None) -> str:
         def sub(match: re.Match[str]) -> str:
             key = match.group(1)
             if key == "python":
                 return sys.executable
             if key == "target":
                 return str(self.root)
+            if key == "canary":
+                if canary is None:
+                    raise FixtureError(f"{self.name}: {{canary}} needs [network] with canary = true")
+                return canary
             value = state_dir if key == "state" else source
             if value is None:
                 raise FixtureError(f"{self.name}: {{{key}}} is not available here")
@@ -200,11 +208,13 @@ class Fixture:
 
         return _PLACEHOLDER.sub(sub, text)
 
-    def server_command(self, source: Path | None = None, state_dir: Path | None = None) -> list[str]:
-        return [self._expand(part, state_dir, source) for part in self.command]
+    def server_command(
+        self, source: Path | None = None, state_dir: Path | None = None, canary: str | None = None
+    ) -> list[str]:
+        return [self._expand(part, state_dir, source, canary) for part in self.command]
 
-    def server_env(self, state_dir: Path, source: Path | None = None) -> dict[str, str]:
-        return {k: self._expand(v, state_dir, source) for k, v in (self.env or {}).items()}
+    def server_env(self, state_dir: Path, source: Path | None = None, canary: str | None = None) -> dict[str, str]:
+        return {k: self._expand(v, state_dir, source, canary) for k, v in (self.env or {}).items()}
 
     def build_adapters(self, state_dir: Path) -> list[SnapshotAdapter]:
         adapters = []
@@ -275,7 +285,7 @@ def load(name_or_path: str | Path) -> Fixture:
         data,
         file.name,
         required={section, "state", "adapters"},
-        optional={"tools"} | ({"source"} if is_target else set()),
+        optional={"tools", "network"} | ({"source"} if is_target else set()),
     )
 
     meta = data[section]
@@ -304,7 +314,8 @@ def load(name_or_path: str | Path) -> Fixture:
             if outer is not inner and _nested(inner.label, outer.label) and outer.kind != "fs":
                 raise FixtureError(f"{inner.label!r} is inside {outer.label!r}, which is not a directory adapter")
 
-    tools = tuple(_tool(t, is_target) for t in _list(data.get("tools", []), "tools"))
+    network = _network(data["network"]) if "network" in data else None
+    tools = tuple(_tool(t, is_target, network is not None) for t in _list(data.get("tools", []), "tools"))
     if len({t.key for t in tools}) != len(tools):
         raise FixtureError("duplicate tool entries: give each argument set of one tool a distinct variant")
 
@@ -328,6 +339,7 @@ def load(name_or_path: str | Path) -> Fixture:
         source=source,
         env=dict(env),
         node=node,
+        network=network,
     )
 
 
@@ -460,7 +472,43 @@ def _adapter(data: Any, root: Path) -> AdapterSpec:
     )
 
 
-def _tool(data: Any, is_target: bool) -> ToolSpec:
+def _network(data: Any) -> NetworkSpec:
+    where = "[network]"
+    _keys(data, where, required={"policy"}, optional={"allow", "capture", "canary", "coverage"})
+    policy = _str(data["policy"], f"{where}.policy")
+    if policy not in POLICIES:
+        raise FixtureError(f"{where}.policy must be one of {', '.join(POLICIES)}")
+    allow = tuple(_strs(data.get("allow", []), f"{where}.allow"))
+    if allow and policy != "allowlist":
+        raise FixtureError(f'{where}.allow applies only to policy = "allowlist"')
+    if policy == "allowlist" and not allow:
+        raise FixtureError(f'{where}: policy = "allowlist" needs at least one allow entry')
+    coverage = _str(data.get("coverage", "complete"), f"{where}.coverage")
+    if coverage not in COVERAGE:
+        raise FixtureError(f"{where}.coverage must be one of {', '.join(COVERAGE)}")
+    flags = {}
+    for key, default in (("capture", False), ("canary", True)):
+        value = data.get(key, default)
+        if not isinstance(value, bool):
+            raise FixtureError(f"{where}.{key} must be a boolean")
+        flags[key] = value
+    return NetworkSpec(policy=policy, allow=allow, coverage=coverage, **flags)
+
+
+def expand_arguments(value: Any, canary: str | None) -> Any:
+    """Tool arguments with every "{canary}" in their strings replaced."""
+    if isinstance(value, str):
+        if "{canary}" in value and canary is None:
+            raise FixtureError("{canary} in tool arguments needs [network] with canary = true")
+        return value.replace("{canary}", canary) if canary else value
+    if isinstance(value, Mapping):
+        return {k: expand_arguments(v, canary) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_arguments(v, canary) for v in value]
+    return value
+
+
+def _tool(data: Any, is_target: bool, network: bool = False) -> ToolSpec:
     where = "[[tools]]"
     if is_target and "expected" in data:
         raise FixtureError(
@@ -472,7 +520,13 @@ def _tool(data: Any, is_target: bool) -> ToolSpec:
     raw_expected = data.get("expected", {})
     if not isinstance(raw_expected, Mapping):
         raise FixtureError(f"{where}.expected must be a table")
+    expected_network = None
     for test_name, spec in raw_expected.items():
+        if test_name == "network":
+            if not network:
+                raise FixtureError(f"{where}.expected.network needs a [network] section")
+            expected_network = _network_expectation(spec, f"{where}.expected.network")
+            continue
         try:
             test = TestKind(test_name)
         except ValueError as exc:
@@ -489,7 +543,21 @@ def _tool(data: Any, is_target: bool) -> ToolSpec:
         arguments=dict(arguments),
         expected=expected,
         variant=variant,
+        expected_network=expected_network,
     )
+
+
+def _network_expectation(data: Any, where: str) -> tuple[Outcome, NetworkReason | None]:
+    _keys(data, where, required={"verdict"})
+    outcome_text, _, reason_text = _str(data["verdict"], where).partition(":")
+    try:
+        outcome = Outcome(outcome_text)
+        reason = NetworkReason(reason_text) if reason_text else None
+    except ValueError as exc:
+        raise FixtureError(f"{where}: {exc}") from exc
+    if outcome is Outcome.NOT_APPLICABLE or (outcome is Outcome.INCONCLUSIVE) != (reason is not None):
+        raise FixtureError(f"{where}: PASS, VIOLATION or INCONCLUSIVE:<reason>, with a reason only for INCONCLUSIVE")
+    return outcome, reason
 
 
 _FLAGS = ("business_changed", "append_only_changed", "errored_with_side_effects")
