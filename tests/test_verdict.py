@@ -412,8 +412,10 @@ def test_concurrent_with_partial_coverage():
     assert outcome(verified) == (Outcome.INCONCLUSIVE, IR.PARTIAL_COVERAGE)
     assert verified.secondary_reasons == ()
     unverified = verdict_for(CO, claim(CO, attempts=held(3, ONE, Overlap.UNVERIFIED)), coverage=PARTIAL)
-    assert outcome(unverified) == (Outcome.INCONCLUSIVE, IR.NO_OVERLAP_OBSERVED)
-    assert unverified.secondary_reasons == (IR.PARTIAL_COVERAGE,)
+    # Partial coverage comes from the definition; unverified overlap from machine timing.
+    # The fixed reason is primary, so the verdict does not change with machine speed.
+    assert outcome(unverified) == (Outcome.INCONCLUSIVE, IR.PARTIAL_COVERAGE)
+    assert unverified.secondary_reasons == (IR.NO_OVERLAP_OBSERVED,)
     diverged = verdict_for(CO, claim(CO, attempts=[attempt(ONE, Overlap.UNVERIFIED, added=[B])]), coverage=PARTIAL)
     assert outcome(diverged) == (Outcome.VIOLATION, None)
 

@@ -460,11 +460,15 @@ def _verdict(run: FixtureRun, ev: ToolEvidence, test: TestKind) -> Verdict:
     # mode, which is informational.
     partial = [i for i in issues if i.reason in _NON_BLOCKING]
     blocking = [i for i in issues if i.reason not in _NON_BLOCKING]
+    coverage = [i for i in partial if i.reason is InconclusiveReason.PARTIAL_COVERAGE]
+    if blocking and coverage and all(i.reason is InconclusiveReason.NO_OVERLAP_OBSERVED for i in blocking):
+        # Partial coverage is a property of the definition; whether overlap was
+        # seen depends on machine timing. The primary reason must not.
+        return verdict(inconclusive, coverage[0], blocking + [i for i in partial if i is not coverage[0]])
     if blocking:
         return verdict(inconclusive, blocking[0], blocking[1:] + partial)
     if behavior is Behavior.FAILS:
         return verdict(Outcome.VIOLATION, rest=partial)
-    coverage = [i for i in partial if i.reason is InconclusiveReason.PARTIAL_COVERAGE]
     if coverage:
         return verdict(inconclusive, coverage[0], [i for i in partial if i is not coverage[0]])
     return verdict(Outcome.PASS, rest=partial)

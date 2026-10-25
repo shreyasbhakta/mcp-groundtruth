@@ -34,8 +34,9 @@ secondary = ["PARTIAL_COVERAGE"]
 
 # Overlap is verified and nothing observed diverges, but the journal is unseen.
 [tools.expected.concurrent_idempotence]
+# Partial coverage is the primary reason whatever the timing. Secondary
+# reasons are not pinned: on a slow machine NO_OVERLAP_OBSERVED joins them.
 verdict = "INCONCLUSIVE:PARTIAL_COVERAGE"
-secondary = []
 
 [[tools]]
 name = "peek"

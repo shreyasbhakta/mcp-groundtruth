@@ -410,6 +410,12 @@ The primary reason is the first rule that applies:
 A VIOLATION may be issued with incomplete coverage, because the contradiction
 was observed on state the adapter does see. A PASS never can.
 
+When both `NO_OVERLAP_OBSERVED` and `PARTIAL_COVERAGE` apply,
+`PARTIAL_COVERAGE` is the primary reason and `NO_OVERLAP_OBSERVED` a
+secondary one. Coverage comes from the definition and is the same on every
+machine. Whether overlap was observed depends on timing, so it must not
+decide the primary reason.
+
 ### Evidence
 
 Every verdict carries the full tri-state contract, the observed property and

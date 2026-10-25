@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- When a concurrent verdict is INCONCLUSIVE for both `PARTIAL_COVERAGE`
+  and `NO_OVERLAP_OBSERVED`, `PARTIAL_COVERAGE` is now the primary reason.
+  Previously the timing-dependent reason won, so the same fixture got
+  different verdicts on fast and slow machines.
 - Prepared sources are checked out per commit *and* build commands, so two
   targets pinning one commit but building different packages never share a
   build. Existing checkouts must be prepared again.
