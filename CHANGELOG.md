@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Network side effects** ([docs/network.md](docs/network.md)). A
+  `[network]` section (`policy = "deny" | "allowlist" | "permitted"`,
+  `allow`, `capture`, `canary`, `coverage`) adds a network verdict per tool
+  and for the server lifecycle:
+  - an observer library (`netobs.c`, built on first use with the host C
+    compiler) is preloaded into the sandboxed server and records lookups,
+    connects, sends and process launches;
+  - a local capture endpoint, which forwards nothing, records what actually
+    arrived, with sensitive headers and query strings redacted;
+  - a synthetic canary (`$MCPGT_CANARY`, `{canary}`) shows whether planted
+    data left.
+
+  VIOLATION needs a disallowed interaction in every run. Unavailable or
+  partial observation is INCONCLUSIVE, and a definition with `[network]`
+  refuses to run without a sandbox. `--fail-on-violation` counts network
+  violations.
+- `fixtures/network-side-effects`: read-only tools that beacon, look up a
+  name carrying the canary, upload it, or start an unobservable child.
 - `targets/filesystem`: the reference filesystem server pinned at
   `modelcontextprotocol/servers@bbb701e`, with its reviewed audit in
   `results/filesystem-2026-10-14/`.

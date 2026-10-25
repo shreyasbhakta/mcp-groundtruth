@@ -30,6 +30,7 @@ what it does.
 - [Fixtures](#fixtures)
 - [Defining a fixture](#defining-a-fixture)
 - [Auditing third-party servers](#auditing-third-party-servers)
+- [Network side effects](#network-side-effects)
 - [Audit results](#audit-results)
 - [Design guarantees](#design-guarantees)
 - [Limitations](#limitations)
@@ -277,6 +278,7 @@ enforces this for all 72 (tool, test) pairs.
 | `malformed-hints` | Hand-written JSON-RPC server emitting string, number, null, duplicate-key and list annotations. | MALFORMED_DECLARATION |
 | `liar-readonly-error` | Declares read-only; writes, then returns `isError`. | VIOLATION with side effects; a clean failure is CALL_ERROR |
 | `startup-writer` | Writes a boot-log row on every start. | read-only PASS; concurrent NO_OVERLAP_OBSERVED |
+| `network-side-effects` | Read-only tools that beacon, look up a name, upload a planted secret, or start an unobservable child. | read-only PASS for all; network VIOLATION, VIOLATION, VIOLATION and PARTIAL_OBSERVATION |
 
 ---
 
@@ -342,6 +344,42 @@ uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
 
 ---
 
+## Network side effects
+
+*Unreleased: on `main`.* A tool can return the right answer, change no
+stored state and declare itself read-only, and still send your data
+somewhere. Add a `[network]` section to a definition, and the harness:
+
+- runs the server in the sandbox;
+- records every connection, lookup and upload it attempts, with an observer
+  library preloaded into the server;
+- receives anything it manages to send at a local capture endpoint that
+  forwards nothing;
+- plants a synthetic secret and reports where it turned up.
+
+```toml
+[network]
+policy = "deny"   # deny | allowlist | permitted
+capture = true
+```
+
+```text
+  tool                       verdict                            attempted  blocked  sent  canary  destinations
+  read_note                  PASS                                       0        0     0      no  -
+  read_note_and_beacon       VIOLATION                                  9        9     0      no  192.0.2.1:443
+  read_note_and_upload       VIOLATION                                  9        0     9     yes  capture, collector.invalid:80
+  read_note_with_helper      INCONCLUSIVE:PARTIAL_OBSERVATION           0        0     0      no  -
+```
+
+An attempt and a transmission are reported separately. Missing or partial
+observation is INCONCLUSIVE, never PASS, and without a sandbox the run
+refuses to start. macOS is fully supported. On Linux the network is blocked
+and attempts are observed, but there is no capture endpoint. Details,
+configuration, guarantees and gaps:
+[docs/network.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/network.md).
+
+---
+
 ## Audit results
 
 Two servers have been audited, both from `modelcontextprotocol/servers@bbb701e`,
@@ -378,6 +416,12 @@ about other servers or other versions of these.
 
 - **stdio servers only.** Streamable HTTP and other transports are not
   supported.
+- **Network observation is best effort.** It sees libc calls in processes
+  that loaded the observer. Raw system calls, statically linked binaries and
+  unobserved children are not seen; unobserved children are reported as
+  coverage gaps. A server written to evade it can, but it cannot evade the
+  sandbox. The capture endpoint is macOS only. See
+  [docs/network.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/network.md#known-gaps).
 - **State in SQLite, files or JSON only.** Observation covers SQLite
   databases, files and directory trees, and JSON or JSON Lines files.
   State held anywhere else (process memory, another database, a remote
