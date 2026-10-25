@@ -346,7 +346,7 @@ uv run mcpgt run memory --audit      # sandboxed audit, full evidence report
 
 ## Network side effects
 
-*Unreleased: on `main`.* A tool can return the right answer, change no
+*Since 0.3.0.* A tool can return the right answer, change no
 stored state and declare itself read-only, and still send your data
 somewhere. Add a `[network]` section to a definition, and the harness:
 

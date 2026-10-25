@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+Checks what a tool tries to reach on the network, not only what it changes
+on disk: an observer inside the sandboxed server, a local capture endpoint
+that forwards nothing, and a planted canary. Supported on macOS and Linux,
+tested end to end on both in CI, and run against the reference memory and
+filesystem servers.
+
 ### Added
 
 - **Network side effects** ([docs/network.md](docs/network.md)). A
@@ -159,6 +167,7 @@ ground truth; does not test third-party servers.
 - Eleven ground-truth fixture servers and an end-to-end ground-truth test.
 - Methodology documentation.
 
-[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.3.0
 [0.2.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.2.0
 [0.1.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.1.0
