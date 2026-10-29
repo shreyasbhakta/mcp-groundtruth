@@ -1,6 +1,6 @@
 # Issue for modelcontextprotocol/servers (Feature request form)
 
-Opened on 2026-10-14 as [modelcontextprotocol/servers#5153](https://github.com/modelcontextprotocol/servers/issues/5153). The title and body as drafted are below.
+Opened on 2026-10-14 as [modelcontextprotocol/servers#5153](https://github.com/modelcontextprotocol/servers/issues/5153). Resolved: the maintainers merged [modelcontextprotocol/servers#5349](https://github.com/modelcontextprotocol/servers/pull/5349) into `v2/main` on 2026-10-29, declaring `idempotentHint: true` on all three tools, and closed the issue as completed (milestone v2.3.0). The title and body as drafted are below.
 
 **Title:** memory: create_entities, create_relations and add_observations could declare idempotentHint: true
 

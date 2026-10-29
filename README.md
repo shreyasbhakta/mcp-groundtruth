@@ -388,7 +388,7 @@ about other servers or other versions of these.
 
 | Server | Tools (argument sets) | Violations | Over-declarations | Network attempts | Review |
 |---|---|---|---|---|---|
-| memory (`@modelcontextprotocol/server-memory` 1.0.0) | 9 (one each, and 12 for the three create/add tools) | none | 3: `create_entities`, `create_relations` and `add_observations` declare `idempotentHint: false`, but a repeated identical call changed nothing | none ([review](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/network-2026-10-25/REVIEW.md)) | [REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/memory-2026-10-14/REVIEW.md) |
+| memory (`@modelcontextprotocol/server-memory` 1.0.0) | 9 (one each, and 12 for the three create/add tools) | none | 3: `create_entities`, `create_relations` and `add_observations` declare `idempotentHint: false`, but a repeated identical call changed nothing; [fixed upstream](https://github.com/modelcontextprotocol/servers/pull/5349) | none ([review](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/network-2026-10-25/REVIEW.md)) | [REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/memory-2026-10-14/REVIEW.md) |
 | filesystem (`@modelcontextprotocol/server-filesystem` 1.0.0) | 14 (22) | none | 1: `move_file` declares `idempotentHint: false`; a repeat changes nothing but reports an error, so `false` is defensible | none ([review](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/network-2026-10-25/REVIEW.md)) | [REVIEW.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/results/filesystem-2026-10-14/REVIEW.md) |
 
 ---

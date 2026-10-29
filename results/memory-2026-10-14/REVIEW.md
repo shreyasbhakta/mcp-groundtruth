@@ -97,7 +97,9 @@ Neither affects idempotence, which concerns repeated identical calls.
 - `create_entities` with an existing name discards the request's
   observations; the response lists the entity as skipped.
 - `add_observations` does not de-duplicate within one call: sending the same
-  content twice stores it twice. A repeat of that call adds nothing.
+  content twice stores it twice. A repeat of that call adds nothing. (Fixed
+  upstream separately: [modelcontextprotocol/servers#5357](https://github.com/modelcontextprotocol/servers/pull/5357),
+  merged 2026-10-29.)
 
 ## Caveats
 
@@ -122,3 +124,6 @@ Neither affects idempotence, which concerns repeated identical calls.
 - Results are from macOS. On Linux the sandbox does not confine file writes.
 
 Upstream issue: [modelcontextprotocol/servers#5153](https://github.com/modelcontextprotocol/servers/issues/5153), opened on 2026-10-14 (draft: [upstream-issue.md](upstream-issue.md)).
+Resolved on 2026-10-29: [modelcontextprotocol/servers#5349](https://github.com/modelcontextprotocol/servers/pull/5349),
+merged into `v2/main`, declares `idempotentHint: true` on all three tools.
+This audit's results describe the pinned commit `bbb701e`, before that change.
