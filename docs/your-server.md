@@ -281,6 +281,12 @@ as a list tool. The harness then also checks whether each read-only or
 idempotent tool changes what the probe returns. See
 [probes.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/probes.md).
 
+### Data that travels between tools
+
+To check whether sensitive data can leave through a sequence of tools, plant
+`{marker:NAME}` in a seed and list chains under `[[lineage.chains]]`. See
+[lineage.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/lineage.md).
+
 ## 7. Gate releases in CI
 
 Once the target is in your repository, you can make the build fail when a

@@ -32,6 +32,7 @@ what it does.
 - [Auditing third-party servers](#auditing-third-party-servers)
 - [Network side effects](#network-side-effects)
 - [Probes: state the harness cannot see](#probes-state-the-harness-cannot-see)
+- [Lineage: tracing data across tool calls](#lineage-tracing-data-across-tool-calls)
 - [Audit results](#audit-results)
 - [Design guarantees](#design-guarantees)
 - [Limitations](#limitations)
@@ -264,8 +265,8 @@ seed. Timestamps, SHAs and timing measurements are capture metadata.
 Each fixture is a small, real MCP server over stdio with its expected
 verdicts recorded in `fixture.toml`. The harness is correct when every
 fixture gets exactly its expected verdicts. `tests/test_ground_truth.py`
-enforces this for all 122 expected verdicts: 112 (tool, test)
-pairs, 5 network verdicts and 5 probe verdicts.
+enforces this for all 161 expected verdicts: 140 (tool, test)
+pairs, 12 network verdicts, 5 probe verdicts and 4 lineage verdicts.
 
 | Fixture | Behavior | Key expected verdicts |
 |---|---|---|
@@ -282,6 +283,7 @@ pairs, 5 network verdicts and 5 probe verdicts.
 | `startup-writer` | Writes a boot-log row on every start. | read-only PASS; concurrent NO_OVERLAP_OBSERVED |
 | `network-side-effects` | Read-only tools that beacon, look up a name, upload a planted secret, or start an unobservable child. | read-only PASS for all; network VIOLATION, VIOLATION, VIOLATION and PARTIAL_OBSERVATION |
 | `hidden-state` | Keeps state in server memory as well as in SQLite: a read-only tool that marks notes as seen, an idempotent-declared counter. | every state verdict PASS or NOT_APPLICABLE; probe VIOLATION for the two false hints |
+| `data-lineage` | Tools that leak a planted SSN only in sequence: through a drafts table (base64), through memory (DNS), over HTTPS, or not at all. | every tool's own network verdict PASS; lineage VIOLATION (complete), VIOLATION (partial), INCONCLUSIVE, PASS |
 
 ---
 
@@ -419,6 +421,50 @@ what probes cannot see:
 
 ---
 
+## Lineage: tracing data across tool calls
+
+*Since 0.5.0.* A tool can pass every test on its own and still be one step in
+a leak: one tool copies a customer's SSN into a drafts table, and another
+syncs drafts to a server. Lineage plants a synthetic secret (`{marker:ssn}`
+in a seed or argument), calls a chain of tools, and reconstructs the path
+it took, step by step, with the evidence for each step.
+
+```toml
+[[lineage.chains]]
+tools = ["read_customer", "save_draft", "sync_drafts"]
+```
+
+```text
+  read_customer > save_draft > sync_drafts: VIOLATION (complete)
+      ssn: source: state sqlite:state.db/customers [OBSERVED]
+           ->  call 2 save_draft: wrote sqlite:state.db/drafts [ATTRIBUTED]
+           ->  call 3 sync_drafts: sent it to collector.invalid:80 (base64) [ATTRIBUTED]
+      ssn: leaks without call(s) 1
+  remember > beacon: VIOLATION (partial)
+      ssn: source: state sqlite:state.db/customers [OBSERVED]
+           ->  call 1 remember: needed, but no trace of the marker (unobserved state) [INFERRED]
+           ->  call 2 beacon: looked up <ssn>.exfil.invalid [ATTRIBUTED]
+  save_draft > sync_drafts_tls: INCONCLUSIVE:PARTIAL_OBSERVATION
+```
+
+The marker is looked for in every response, in stored state, in bytes that
+reach the capture endpoint and in DNS names, as plain text, hex, base64 or
+reversed. Attribution comes from controlled reruns, not timing:
+
+- each prefix of the chain runs from a clean reset, several times;
+- a step is ATTRIBUTED to the call after which it appears in every run;
+- rerunning without each earlier call shows which calls the leak needs;
+- a needed call that leaves no observable trace is an INFERRED step, as when
+  the value passed through memory.
+
+Encrypted egress is INCONCLUSIVE, never PASS. In the `data-lineage` fixture,
+every tool passes its own network test; three chains show the difference.
+How it works, the evidence grades, and what lineage cannot see (notably,
+values an AI client copies between calls):
+[docs/lineage.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/lineage.md).
+
+---
+
 ## Audit results
 
 Two servers have been audited, both from `modelcontextprotocol/servers@bbb701e`,
@@ -512,6 +558,7 @@ src/mcpgt/
   runner.py      reset, sessions, concurrent attempts, evidence collection
   verdict.py     verdict derivation and declaration coherence
   probes.py      probe verdicts: other tools' outputs as a second observer
+  lineage.py     lineage: planted markers traced along chains of calls
   network.py     network verdicts against the declared policy
   report.py      JSON reports, expectation checks, text summary
   provenance.py  source, harness and capture provenance

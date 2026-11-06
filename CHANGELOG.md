@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Lineage** (`[[lineage.chains]]`): synthetic markers planted with
+  `{marker:NAME}` in seeds or tool arguments, traced along chains of tool
+  calls. Markers are looked for in responses, stored state, captured bytes
+  and DNS names, as plain text, hex, base64, base64url or reversed. Each
+  prefix of a chain runs from a clean reset; a sighting is ATTRIBUTED to the
+  call after which it appears in every run. Reruns without each earlier call
+  find the calls a leak needs; a needed call with no observed trace is an
+  INFERRED step. One verdict per chain (VIOLATION when a marker leaves; PASS
+  only with complete observation and no encrypted egress), with a graded
+  path per marker. Requires `[network]` with `policy = "deny"` and
+  `capture = true`. See `docs/lineage.md`.
+- `data-lineage` fixture: every tool passes its own network test; chains leak
+  through a table (base64), through memory (DNS), over HTTPS
+  (INCONCLUSIVE), or not at all.
+- The capture endpoint records which lineage markers each connection carried.
+
 ## [0.4.0] - 2026-11-06
 
 Catches state the harness cannot see directly, such as server memory,
