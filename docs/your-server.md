@@ -273,6 +273,14 @@ When a verdict surprises you, check the evidence before concluding anything:
 - **VIOLATION:** reproduce it by hand from the logged calls before reporting
   it to anyone else.
 
+### State kept in memory
+
+If your server keeps state in memory or anywhere the adapters can't observe,
+add a `[probes]` section naming a tool whose output shows that state, such
+as a list tool. The harness then also checks whether each read-only or
+idempotent tool changes what the probe returns. See
+[probes.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/probes.md).
+
 ## 7. Gate releases in CI
 
 Once the target is in your repository, you can make the build fail when a

@@ -31,6 +31,7 @@ what it does.
 - [Defining a fixture](#defining-a-fixture)
 - [Auditing third-party servers](#auditing-third-party-servers)
 - [Network side effects](#network-side-effects)
+- [Probes: state the harness cannot see](#probes-state-the-harness-cannot-see)
 - [Audit results](#audit-results)
 - [Design guarantees](#design-guarantees)
 - [Limitations](#limitations)
@@ -263,7 +264,8 @@ seed. Timestamps, SHAs and timing measurements are capture metadata.
 Each fixture is a small, real MCP server over stdio with its expected
 verdicts recorded in `fixture.toml`. The harness is correct when every
 fixture gets exactly its expected verdicts. `tests/test_ground_truth.py`
-enforces this for all 72 (tool, test) pairs.
+enforces this for all 122 expected verdicts: 112 (tool, test)
+pairs, 5 network verdicts and 5 probe verdicts.
 
 | Fixture | Behavior | Key expected verdicts |
 |---|---|---|
@@ -279,6 +281,7 @@ enforces this for all 72 (tool, test) pairs.
 | `liar-readonly-error` | Declares read-only; writes, then returns `isError`. | VIOLATION with side effects; a clean failure is CALL_ERROR |
 | `startup-writer` | Writes a boot-log row on every start. | read-only PASS; concurrent NO_OVERLAP_OBSERVED |
 | `network-side-effects` | Read-only tools that beacon, look up a name, upload a planted secret, or start an unobservable child. | read-only PASS for all; network VIOLATION, VIOLATION, VIOLATION and PARTIAL_OBSERVATION |
+| `hidden-state` | Keeps state in server memory as well as in SQLite: a read-only tool that marks notes as seen, an idempotent-declared counter. | every state verdict PASS or NOT_APPLICABLE; probe VIOLATION for the two false hints |
 
 ---
 
@@ -380,6 +383,42 @@ configuration, guarantees and gaps:
 
 ---
 
+## Probes: state the harness cannot see
+
+*Since 0.4.0.* The state tests watch files and databases. A server can also
+keep state in memory, where no adapter can look. A read-only tool that
+quietly marks a note as "seen" in memory passes every state test.
+
+Probes catch it through another tool's answer. A probe is a tool whose output
+reflects state, such as `list_notes`. The harness calls the probe alone, then
+calls "tool, then probe", each from a fresh server and several times. If the
+probe's answer changes in every run, the tool changed something.
+
+```toml
+[probes]
+tools = ["list_notes"]
+ignore = ['"served_at": [0-9.]+']   # optional: parts that change on every call
+```
+
+```text
+  tool         test               declared   verdict     detail
+  get_note     probe_read_only    true       PASS        no probe output changed (list_notes)
+  peek_note    probe_read_only    true       VIOLATION   output changed: list_notes (3/3 runs); no observed state changed, ...
+  bump         probe_idempotence  true       VIOLATION   output changed: list_notes (3/3 runs); no observed state changed, ...
+  pin          probe_idempotence  true       PASS        no probe output changed (list_notes)
+```
+
+That's the `hidden-state` fixture: every one of its state-based verdicts
+passes, and the probes find the two false hints. `readOnlyHint: true` is
+tested as "tool, then probe" against the probe alone; `idempotentHint: true`
+as "tool twice, then probe" against "tool once, then probe". A probe whose
+output varies on its own decides nothing, and a change seen in some runs only
+is INCONCLUSIVE, not a VIOLATION. How it works, the cost in sessions, and
+what probes cannot see:
+[docs/probes.md](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/probes.md).
+
+---
+
 ## Audit results
 
 Two servers have been audited, both from `modelcontextprotocol/servers@bbb701e`,
@@ -427,7 +466,8 @@ about other servers or other versions of these.
   State held anywhere else (process memory, another database, a remote
   service) cannot be observed. If it is declared, coverage is partial and
   verdicts that depend on it are INCONCLUSIVE. If it is not declared, it is
-  not seen at all. An `fs` adapter on `.` observes the whole state
+  not seen at all, except through [probes](#probes-state-the-harness-cannot-see),
+  which see only what a probe tool returns. An `fs` adapter on `.` observes the whole state
   directory, and on macOS audits block writes outside it.
 - **`mcpgt prepare` supports git sources only.** It fetches one commit,
   named by its full 40-character SHA, of a git repository (the host must
@@ -471,6 +511,8 @@ src/mcpgt/
   fixture.py     strict fixture definitions
   runner.py      reset, sessions, concurrent attempts, evidence collection
   verdict.py     verdict derivation and declaration coherence
+  probes.py      probe verdicts: other tools' outputs as a second observer
+  network.py     network verdicts against the declared policy
   report.py      JSON reports, expectation checks, text summary
   provenance.py  source, harness and capture provenance
   sources.py     pinned third-party sources: prepare and offline verification
@@ -508,7 +550,11 @@ descriptions below follow each project's own documentation as checked on
   read-only tools do not mutate state through a configured state probe: a
   call to another tool on the same server. Without a probe that check
   returns `INDETERMINATE`. It also has latency, determinism and
-  documentation suites.
+  documentation suites. This project's [probes](#probes-state-the-harness-cannot-see)
+  (0.4.0) build on the same idea, adding a clean reset per session, a noise
+  check of each probe on its own, reproduction in every run, idempotence,
+  and a cross-check against observed state
+  ([details](https://github.com/shreyasbhakta/mcp-groundtruth/blob/main/docs/probes.md#prior-work)).
 - **Li, "Where Does Exactly-Once Live?"** [7] benchmarks duplicate side
   effects in LLM agents across model, agent harness and tool contract, in a
   deterministic sandbox of six services with injected faults, and measures

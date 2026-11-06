@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Probes** (`[probes]` in a fixture or target): other tools' outputs as a
+  second observer of state, for state no adapter can see, such as server
+  memory. `readOnlyHint: true` is tested as (tool, probe) against (probe);
+  `idempotentHint: true` as (tool, tool, probe) against (tool, probe). A
+  probe is first checked for noise on its own; a change must be reproduced
+  in every run. One probe verdict per tool (`probe_read_only` or
+  `probe_idempotence`), with `hidden_state` when the state adapters saw no
+  change. `ignore` patterns remove volatile parts of outputs.
+  `expected.probe` gives fixture ground truth; `--fail-on-violation` counts
+  probe violations. See `docs/probes.md`.
+- `hidden-state` fixture: a server whose state tests all pass, with two false
+  hints that only probes catch.
+
 ## [0.3.0] - 2026-10-25
 
 Checks what a tool tries to reach on the network, not only what it changes
