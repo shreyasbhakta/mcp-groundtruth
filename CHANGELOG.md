@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-06
+
+Catches state the harness cannot see directly, such as server memory,
+through what other tools return. Every state-based test passes on the new
+hidden-state fixture; probes find its two false hints.
+
 ### Added
 
 - **Probes** (`[probes]` in a fixture or target): other tools' outputs as a
@@ -182,7 +188,8 @@ ground truth; does not test third-party servers.
 - Eleven ground-truth fixture servers and an end-to-end ground-truth test.
 - Methodology documentation.
 
-[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.4.0
 [0.3.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.3.0
 [0.2.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.2.0
 [0.1.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.1.0
