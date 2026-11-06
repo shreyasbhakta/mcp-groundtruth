@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-06
+
+Traces synthetic data across chains of tool calls: where a planted value
+travels, which calls a leak needs, and how strong the evidence is for each
+step. On the new data-lineage fixture every tool passes its own network
+test, and lineage finds the two sequences that leak.
+
 ### Added
 
 - **Lineage** (`[[lineage.chains]]`): synthetic markers planted with
@@ -206,7 +213,8 @@ ground truth; does not test third-party servers.
 - Eleven ground-truth fixture servers and an end-to-end ground-truth test.
 - Methodology documentation.
 
-[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/shreyasbhakta/mcp-groundtruth/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.5.0
 [0.4.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.4.0
 [0.3.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.3.0
 [0.2.0]: https://github.com/shreyasbhakta/mcp-groundtruth/releases/tag/v0.2.0
