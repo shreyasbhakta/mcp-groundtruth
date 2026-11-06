@@ -217,7 +217,7 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
     violations = [
         f"{tool['tool']} {verdict['test']}"
         for tool in report["tools"]
-        for verdict in [*tool["verdicts"], *([tool["network"]] if "network" in tool else [])]
+        for verdict in [*tool["verdicts"], *(tool[k] for k in ("network", "probe") if k in tool)]
         if verdict["outcome"] == Outcome.VIOLATION.value
     ]
     lifecycle = (report.get("network") or {}).get("lifecycle")

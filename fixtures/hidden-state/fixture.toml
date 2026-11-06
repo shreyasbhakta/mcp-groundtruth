@@ -1,0 +1,118 @@
+[fixture]
+name = "hidden-state"
+description = "Keeps state in memory as well as in SQLite. The state tests pass on every tool; probes catch two false hints."
+command = ["{python}", "server.py"]
+
+[state]
+# Coverage is complete for what is on disk. Server memory is never a state
+# location an adapter can observe; that is what the probes are for.
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["notes"]
+
+[probes]
+# list_notes shows what server memory says about the notes.
+tools = ["list_notes"]
+# A timestamp that differs on every call, removed before outputs are compared.
+ignore = ['"served_at": [0-9.]+']
+
+[[tools]]
+name = "list_notes"
+
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.probe]
+verdict = "PASS"
+
+[[tools]]
+name = "get_note"
+arguments = { id = 1 }
+
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.probe]
+verdict = "PASS"
+
+[[tools]]
+name = "peek_note"
+arguments = { id = 1 }
+
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.probe]
+verdict = "VIOLATION"
+
+[[tools]]
+name = "bump"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.concurrent_idempotence]
+verdict = "PASS"
+
+[tools.expected.probe]
+verdict = "VIOLATION"
+
+[[tools]]
+name = "pin"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.concurrent_idempotence]
+verdict = "PASS"
+
+[tools.expected.probe]
+verdict = "PASS"

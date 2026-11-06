@@ -188,3 +188,38 @@ def test_fs_only_options_are_validated(tmp_path, old, new, message):
     )
     with pytest.raises(fixtures.FixtureError, match=message):
         fixtures.load(root)
+
+
+# --- [probes] ---------------------------------------------------------------
+
+HIDDEN = Path(__file__).parent.parent / "fixtures" / "hidden-state"
+
+
+@pytest.fixture
+def hidden(tmp_path):
+    root = tmp_path / "hs"
+    shutil.copytree(HIDDEN, root, ignore=shutil.ignore_patterns("__pycache__"))
+    return root
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('tools = ["list_notes"]', 'tools = ["missing"]', "no \\[\\[tools\\]\\] entry for missing"),
+        ('tools = ["list_notes"]', "tools = []", "at least one tool"),
+        ("ignore = ['\"served_at\": [0-9.]+']", "ignore = ['(']", "not a valid regex"),
+        ("[probes]", "[probes]\nextra = 1", "unknown keys"),
+    ],
+)
+def test_invalid_probes_are_rejected(hidden, old, new, message):
+    edit(hidden, old, new)
+    with pytest.raises(fixtures.FixtureError, match=message):
+        fixtures.load(hidden)
+
+
+def test_probe_expectation_needs_a_probes_section(hidden):
+    text = (hidden / "fixture.toml").read_text()
+    start, end = text.index("[probes]"), text.index("[[tools]]")
+    (hidden / "fixture.toml").write_text(text[:start] + text[end:])
+    with pytest.raises(fixtures.FixtureError, match="needs a \\[probes\\] section"):
+        fixtures.load(hidden)

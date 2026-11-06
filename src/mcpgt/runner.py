@@ -34,6 +34,7 @@ from mcpgt.capture import CaptureEvent, CaptureServer
 from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
 from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec, expand_arguments
 from mcpgt.normalize import NormalizationError
+from mcpgt.probes import ProbeTest, probe_test
 from mcpgt.sandbox import Isolation, isolated, isolation
 from mcpgt.snapshot import Snapshot, SnapshotDelta, SnapshotError, StateCategory, diff
 from mcpgt.sources import NodeRuntime, PreparedSource, node_runtime
@@ -390,6 +391,14 @@ async def run_session(
 
 
 @dataclass(frozen=True, slots=True)
+class ProbeSessions:
+    """Sessions that each end with one call to the same probe tool."""
+
+    probe: str  # probe tool spec key
+    sessions: tuple[Session, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ToolEvidence:
     tool: str
     contract: DeclaredContract | None
@@ -412,6 +421,8 @@ class ToolEvidence:
     concurrent_call_error: str | None = None
     concurrent_errors: tuple[ErrorRecord, ...] = ()
     concurrent_raw: tuple[ConcurrentRun, ...] = ()
+    probe_once: tuple[ProbeSessions, ...] = ()  # per probe: tool, then probe
+    probe_twice: tuple[ProbeSessions, ...] = ()  # per probe: tool twice, then probe (idempotence only)
 
     @property
     def setup_error(self) -> str | None:
@@ -451,6 +462,7 @@ class FixtureRun:
     untested_tools: tuple[str, ...] = field(default=())  # listed by the server, no ToolSpec
     launch: Launch | None = None
     network: NetworkRun | None = None
+    probe_baselines: tuple[ProbeSessions, ...] = ()  # per probe: the probe alone
 
     @property
     def control_stable(self) -> bool:
@@ -595,6 +607,10 @@ async def _run_fixture(
             )
         )
 
+    probe_baselines: list[ProbeSessions] = []
+    if fixture.probes is not None and reset_result.status is not ResetStatus.SETUP_FAILED:
+        probe_baselines, evidence = await _run_probes(fixture, state_dir, specs, evidence, runs, launch)
+
     # Concurrent attempts, only where there is a falsifiable idempotence claim
     # to test, so the 2 x N extra sessions are spent where they can decide.
     lifecycle_inert = all(not any(o.changed(c) for c in StateCategory) for o in control_effect)
@@ -633,7 +649,46 @@ async def _run_fixture(
         tools=tuple(evidence),
         untested_tools=tuple(sorted(listed - {s.name for s in fixture.tools})),
         launch=launch,
+        probe_baselines=tuple(probe_baselines),
     )
+
+
+async def _run_probes(
+    fixture: Fixture,
+    state_dir: Path,
+    specs: Sequence[ToolSpec],
+    evidence: list[ToolEvidence],
+    runs: int,
+    launch: Launch | None,
+) -> tuple[list[ProbeSessions], list[ToolEvidence]]:
+    """Each probe alone, then each tool followed by each probe.
+
+    Sessions are spent only on tools with a claim the probes can falsify:
+    readOnlyHint:true (tool, probe) or idempotentHint:true (also tool, tool, probe).
+    """
+    assert fixture.probes is not None
+    by_key = {t.key: t for t in fixture.tools}
+    probes = [by_key[k] for k in fixture.probes.tools]
+
+    async def sessions(prefix: str, calls: list[ToolSpec]) -> tuple[Session, ...]:
+        return tuple(
+            [await run_session(fixture, state_dir, f"{prefix}-{i}", calls, launch) for i in range(1, runs + 1)]
+        )
+
+    baselines = [ProbeSessions(p.key, await sessions(f"probe:{p.key}/alone", [p])) for p in probes]
+    out = list(evidence)
+    for i, (spec, ev) in enumerate(zip(specs, evidence, strict=True)):
+        test = probe_test(ev.contract)
+        if test is None:
+            continue
+        once = [ProbeSessions(p.key, await sessions(f"{spec.key}/then-{p.key}", [spec, p])) for p in probes]
+        twice = []
+        if test is ProbeTest.IDEMPOTENCE:
+            twice = [
+                ProbeSessions(p.key, await sessions(f"{spec.key}/twice-then-{p.key}", [spec, spec, p])) for p in probes
+            ]
+        out[i] = dataclasses.replace(ev, probe_once=tuple(once), probe_twice=tuple(twice))
+    return baselines, out
 
 
 def _end(session: Session | ConcurrentRun) -> State:

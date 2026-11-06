@@ -18,6 +18,7 @@ from typing import Any
 import mcpgt
 from mcpgt.fixture import Expectation, Fixture
 from mcpgt.network import NetworkVerdict, derive_network
+from mcpgt.probes import ProbeVerdict, derive_probes
 from mcpgt.provenance import (
     CaptureProvenance,
     SourceProvenance,
@@ -136,6 +137,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
     mismatches: list[dict[str, Any]] = []
     not_run: list[str] = []
     network = {v.tool: v for v in derive_network(run)}
+    probes = {v.tool: v for v in derive_probes(run)}
     for ev in run.tools:
         tool_verdicts = []
         for v in (v for v in verdicts if v.tool == ev.tool):
@@ -161,6 +163,19 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
             net_entry["expected"] = {"problems": problems, "matched": not problems}
             if problems:
                 mismatches.append({"tool": ev.tool, "test": "network", "problems": problems})
+        probe = probes.get(ev.tool)
+        probe_entry = None
+        if probe is not None:
+            sessions = [s.to_json() for ps in ev.probe_once + ev.probe_twice for s in ps.sessions]
+            probe_entry = {**probe.to_json(), "raw_sessions": sessions}
+            want_probe = specs[ev.tool].expected_probe
+            if want_probe is not None and not audit:
+                problems = probe_check(probe, want_probe)
+                checked += 1
+                matched += not problems
+                probe_entry["expected"] = {"problems": problems, "matched": not problems}
+                if problems:
+                    mismatches.append({"tool": ev.tool, "test": "probe", "problems": problems})
         tools.append(
             {
                 "tool": ev.tool,
@@ -174,6 +189,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
                 "concurrent_sessions": [r.to_json() for r in ev.concurrent_raw],
                 "verdicts": tool_verdicts,
                 **({"network": net_entry} if net_entry is not None else {}),
+                **({"probe": probe_entry} if probe_entry is not None else {}),
             }
         )
     return {
@@ -204,6 +220,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
             "listings": [{"sessions": list(r.sessions), **r.listing.to_json()} for r in run.listings],
         },
         "network": _network_block(run, network),
+        "probes": _probes_block(run),
         "tools": tools,
         "untested_tools": list(run.untested_tools),
         "expectations": {
@@ -223,6 +240,26 @@ def network_check(verdict: NetworkVerdict, want: tuple[Outcome, Any]) -> list[st
     got = verdict.outcome.value + (f":{verdict.reason.value}" if verdict.reason else "")
     exp = outcome.value + (f":{reason.value}" if reason else "")
     return [f"network verdict {got}, expected {exp}"]
+
+
+def probe_check(verdict: ProbeVerdict, want: tuple[Outcome, Reason | None]) -> list[str]:
+    outcome, reason = want
+    if verdict.outcome is outcome and verdict.reason is reason:
+        return []
+    return [
+        f"probe verdict {_verdict_text(verdict.outcome, verdict.reason)}, expected {_verdict_text(outcome, reason)}"
+    ]
+
+
+def _probes_block(run: FixtureRun) -> dict[str, Any] | None:
+    """Which probes ran, and each probe alone: the reference every tool is compared against."""
+    spec = run.fixture.probes
+    if spec is None:
+        return None
+    return {
+        **spec.to_json(),
+        "baselines": [{"probe": p.probe, "sessions": [s.to_json() for s in p.sessions]} for p in run.probe_baselines],
+    }
 
 
 def _network_block(run: FixtureRun, verdicts: dict[str, NetworkVerdict]) -> dict[str, Any] | None:
@@ -316,6 +353,8 @@ def render_text(report: dict[str, Any]) -> str:
     net = report.get("network")
     if net:
         lines += _render_network(report, net)
+    if report.get("probes"):
+        lines += _render_probes(report)
     exp = report["expectations"]
     lines.append("")
     if audit:
@@ -354,4 +393,23 @@ def _render_network(report: dict[str, Any], net: dict[str, Any]) -> list[str]:
         )
         if v["outcome"] != "PASS":
             lines.append(f"  {'':<26}   {v['detail']}")
+    return lines
+
+
+def _render_probes(report: dict[str, Any]) -> list[str]:
+    spec = report["probes"]
+    ignore = f"; ignoring {len(spec['ignore'])} pattern(s)" if spec["ignore"] else ""
+    lines = [
+        "",
+        f"  probes: {', '.join(spec['tools'])}{ignore}",
+        f"  {'tool':<26} {'test':<18} {'declared':<10} {'verdict':<38} detail",
+    ]
+    for tool in report["tools"]:
+        v = tool.get("probe")
+        if v is None:
+            continue
+        verdict = v["outcome"] + (f":{v['reason']}" if v["reason"] else "")
+        exp = v.get("expected")
+        mark = "" if exp is None else ("  ok" if exp["matched"] else "  MISMATCH")
+        lines.append(f"  {v['tool']:<26} {v['test'] or '-':<18} {v['declared']:<10} {verdict:<38} {v['detail']}{mark}")
     return lines

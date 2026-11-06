@@ -36,6 +36,7 @@ def test_all_fixtures_present():
                 "liar-readonly-error",
                 "startup-writer",
                 "network-side-effects",
+                "hidden-state",
             ]
         )
         == FIXTURES
@@ -51,6 +52,8 @@ def test_every_tool_has_ground_truth_for_every_implemented_test(name):
         assert not missing, f"{name}/{tool.name} has no expectation for {missing}"
         if fx.network is not None:
             assert tool.expected_network is not None, f"{name}/{tool.name} has no network expectation"
+        if fx.probes is not None:
+            assert tool.expected_probe is not None, f"{name}/{tool.name} has no probe expectation"
 
 
 def network_skip(fx):
@@ -74,6 +77,6 @@ def test_fixture_matches_ground_truth(name, tmp_path):
     report = reports.build(run, derive(run), f"test-{name}")
     exp = report["expectations"]
     assert exp["mismatches"] == [], reports.render_text(report)
-    assert exp["checked"] == len(fx.tools) * (len(IMPLEMENTED) + (fx.network is not None))
+    assert exp["checked"] == len(fx.tools) * (len(IMPLEMENTED) + (fx.network is not None) + (fx.probes is not None))
     assert report["reset_verification"]["status"] == "verified"
     assert report["listing"]["stable"]

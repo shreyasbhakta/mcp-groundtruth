@@ -135,11 +135,23 @@ class ToolSpec:
     expected: Mapping[TestKind, Expectation]
     variant: str | None = None  # distinguishes several argument sets for one tool
     expected_network: tuple[Outcome, NetworkReason | None] | None = None  # fixtures only
+    expected_probe: tuple[Outcome, Reason | None] | None = None  # fixtures only
 
     @property
     def key(self) -> str:
         """Unique within a definition: the tool name, plus the variant if any."""
         return self.name if self.variant is None else f"{self.name}[{self.variant}]"
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeSpec:
+    """Tools whose outputs are compared to detect changes the state adapters cannot see."""
+
+    tools: tuple[str, ...]  # tool spec keys
+    ignore: tuple[str, ...] = ()  # regexes removed from probe outputs before comparing
+
+    def to_json(self) -> dict[str, Any]:
+        return {"tools": list(self.tools), "ignore": list(self.ignore)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +187,7 @@ class Fixture:
     env: Mapping[str, str] | None = None
     node: str | None = None  # required Node major version, for build and run
     network: NetworkSpec | None = None  # observe network interactions against this policy
+    probes: ProbeSpec | None = None  # compare other tools' outputs after each tool
 
     @property
     def kind(self) -> str:
@@ -285,7 +298,7 @@ def load(name_or_path: str | Path) -> Fixture:
         data,
         file.name,
         required={section, "state", "adapters"},
-        optional={"tools", "network"} | ({"source"} if is_target else set()),
+        optional={"tools", "network", "probes"} | ({"source"} if is_target else set()),
     )
 
     meta = data[section]
@@ -315,9 +328,16 @@ def load(name_or_path: str | Path) -> Fixture:
                 raise FixtureError(f"{inner.label!r} is inside {outer.label!r}, which is not a directory adapter")
 
     network = _network(data["network"]) if "network" in data else None
-    tools = tuple(_tool(t, is_target, network is not None) for t in _list(data.get("tools", []), "tools"))
+    probes = _probes(data["probes"]) if "probes" in data else None
+    tools = tuple(
+        _tool(t, is_target, network is not None, probes is not None) for t in _list(data.get("tools", []), "tools")
+    )
     if len({t.key for t in tools}) != len(tools):
         raise FixtureError("duplicate tool entries: give each argument set of one tool a distinct variant")
+    if probes is not None:
+        missing = set(probes.tools) - {t.key for t in tools}
+        if missing:
+            raise FixtureError(f"[probes].tools: no [[tools]] entry for {', '.join(sorted(missing))}")
 
     env = meta.get("env", {})
     if not isinstance(env, Mapping) or not all(isinstance(v, str) for v in env.values()):
@@ -340,6 +360,7 @@ def load(name_or_path: str | Path) -> Fixture:
         env=dict(env),
         node=node,
         network=network,
+        probes=probes,
     )
 
 
@@ -495,6 +516,21 @@ def _network(data: Any) -> NetworkSpec:
     return NetworkSpec(policy=policy, allow=allow, coverage=coverage, **flags)
 
 
+def _probes(data: Any) -> ProbeSpec:
+    where = "[probes]"
+    _keys(data, where, required={"tools"}, optional={"ignore"})
+    tools = tuple(_strs(data["tools"], f"{where}.tools"))
+    if not tools:
+        raise FixtureError(f"{where}.tools needs at least one tool")
+    ignore = tuple(_strs(data.get("ignore", []), f"{where}.ignore"))
+    for pattern in ignore:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise FixtureError(f"{where}.ignore: {pattern!r} is not a valid regex: {exc}") from exc
+    return ProbeSpec(tools, ignore)
+
+
 def expand_arguments(value: Any, canary: str | None) -> Any:
     """Tool arguments with every "{canary}" in their strings replaced."""
     if isinstance(value, str):
@@ -508,7 +544,7 @@ def expand_arguments(value: Any, canary: str | None) -> Any:
     return value
 
 
-def _tool(data: Any, is_target: bool, network: bool = False) -> ToolSpec:
+def _tool(data: Any, is_target: bool, network: bool = False, probes: bool = False) -> ToolSpec:
     where = "[[tools]]"
     if is_target and "expected" in data:
         raise FixtureError(
@@ -520,8 +556,14 @@ def _tool(data: Any, is_target: bool, network: bool = False) -> ToolSpec:
     raw_expected = data.get("expected", {})
     if not isinstance(raw_expected, Mapping):
         raise FixtureError(f"{where}.expected must be a table")
-    expected_network = None
+    expected_network = expected_probe = None
     for test_name, spec in raw_expected.items():
+        if test_name == "probe":
+            if not probes:
+                raise FixtureError(f"{where}.expected.probe needs a [probes] section")
+            expectation = _expectation(spec, f"{where}.expected.probe")
+            expected_probe = (expectation.outcome, expectation.reason)
+            continue
         if test_name == "network":
             if not network:
                 raise FixtureError(f"{where}.expected.network needs a [network] section")
@@ -544,6 +586,7 @@ def _tool(data: Any, is_target: bool, network: bool = False) -> ToolSpec:
         expected=expected,
         variant=variant,
         expected_network=expected_network,
+        expected_probe=expected_probe,
     )
 
 
