@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -39,6 +41,7 @@ class CaptureEvent:
     path: str | None = None  # without the query string
     query_redacted: bool = False
     headers: dict[str, str] = field(default_factory=dict)
+    markers: tuple[str, ...] = ()  # lineage marker labels ("name/variant") found in the bytes
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -82,9 +85,17 @@ def _host_port(authority: str, default: int | None) -> tuple[str | None, int | N
     return host or None, int(port) if port.isdigit() else default
 
 
-def parse(data: bytes, canary: str | None, ts: int, peer_port: int) -> CaptureEvent:
+def parse(
+    data: bytes, canary: str | None, ts: int, peer_port: int, needles: Mapping[str, str] | None = None
+) -> CaptureEvent:
     """What one connection delivered, as metadata."""
     found = canary is not None and canary != "" and canary.encode() in data
+    event = _parse(data, found, ts, peer_port)
+    hits = tuple(sorted({label for needle, label in (needles or {}).items() if needle.encode() in data}))
+    return dataclasses.replace(event, markers=hits) if hits else event
+
+
+def _parse(data: bytes, found: bool, ts: int, peer_port: int) -> CaptureEvent:
     head, _, _ = data.partition(b"\r\n\r\n")
     lines = head.decode("latin-1").split("\r\n")
     parts = lines[0].split(" ") if lines else []
@@ -106,8 +117,11 @@ def parse(data: bytes, canary: str | None, ts: int, peer_port: int) -> CaptureEv
 class CaptureServer:
     """The endpoint. ``async with CaptureServer(canary) as cap:`` binds it; leaving closes it."""
 
-    def __init__(self, canary: str | None = None, unix_path: str | None = None) -> None:
+    def __init__(
+        self, canary: str | None = None, unix_path: str | None = None, needles: Mapping[str, str] | None = None
+    ) -> None:
         self.canary = canary
+        self.needles = needles  # lineage marker variants: needle -> "name/variant"
         self.unix_path = unix_path  # also listen here: the Linux namespace relay connects to it
         self.events: list[CaptureEvent] = []
         self._servers: list[asyncio.Server] = []
@@ -141,7 +155,7 @@ class CaptureServer:
         # A slow or silent client still leaves whatever it sent in buf.
         with contextlib.suppress(TimeoutError, ConnectionError):
             await asyncio.wait_for(self._read(reader, buf), READ_TIMEOUT)
-        event = parse(bytes(buf), self.canary, ts, int(peer[1]))
+        event = parse(bytes(buf), self.canary, ts, int(peer[1]), self.needles)
         self.events.append(event)
         reply = {
             "http": b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

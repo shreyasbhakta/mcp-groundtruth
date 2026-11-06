@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,8 @@ from mcpgt import nsrelay
 from mcpgt import observer as observers
 from mcpgt.capture import CaptureEvent, CaptureServer
 from mcpgt.contracts import Annotation, ContractParseError, DeclaredContract, Hint, ToolListing, parse_listing
-from mcpgt.fixture import Fixture, FixtureCoverage, ToolSpec, expand_arguments
+from mcpgt.fixture import ChainSpec, Fixture, FixtureCoverage, ToolSpec, expand_arguments, expand_markers
+from mcpgt.lineage import new_markers, scan_state, variants
 from mcpgt.normalize import NormalizationError
 from mcpgt.probes import ProbeTest, probe_test
 from mcpgt.sandbox import Isolation, isolated, isolation
@@ -62,8 +63,9 @@ class SetupError(RuntimeError):
     """Reset, seeding or observation failed (SETUP_FAILED)."""
 
 
-def reset(fixture: Fixture, state_dir: Path) -> None:
-    """Wipe ``state_dir`` and rebuild every surface from its seed."""
+def reset(fixture: Fixture, state_dir: Path, markers: Mapping[str, str] | None = None) -> None:
+    """Wipe ``state_dir`` and rebuild every surface from its seed, with
+    ``{marker:NAME}`` placeholders replaced by this run's tokens."""
     if state_dir.exists():
         shutil.rmtree(state_dir)
     state_dir.mkdir(parents=True)
@@ -77,25 +79,36 @@ def reset(fixture: Fixture, state_dir: Path) -> None:
                     target.mkdir(parents=True, exist_ok=True)
                 else:
                     shutil.copytree(seed, target, symlinks=True, dirs_exist_ok=True)
+                    if markers:
+                        _expand_tree(target, markers)
                 for empty in spec.empty_dirs:
                     (target / empty).mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if spec.kind == "sqlite":
-                _seed_sqlite(target, seed)
+                _seed_sqlite(target, seed, markers)
             elif seed is None:
                 target.write_text("" if spec.json_format == "jsonl" else "{}\n")
             else:
                 shutil.copyfile(seed, target)
+                if markers:
+                    _expand_tree(target, markers)
         except (sqlite3.Error, OSError) as exc:
             raise SetupError(f"{spec.surface}: seed failed: {exc}") from exc
 
 
-def _seed_sqlite(db: Path, script: Path | None) -> None:
+def _expand_tree(root: Path, markers: Mapping[str, str]) -> None:
+    """Replace marker placeholders in every seeded file that has one."""
+    for path in [root] if root.is_file() else sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink() and b"{marker:" in path.read_bytes():
+            path.write_text(expand_markers(path.read_text(), markers))
+
+
+def _seed_sqlite(db: Path, script: Path | None, markers: Mapping[str, str] | None = None) -> None:
     conn = sqlite3.connect(db)
     try:
         if script is not None:
-            conn.executescript(script.read_text())
+            conn.executescript(expand_markers(script.read_text(), markers))
         conn.commit()
     finally:
         conn.close()
@@ -134,7 +147,7 @@ class ResetVerification:
         }
 
 
-def verify_reset(fixture: Fixture, state_dir: Path) -> ResetVerification:
+def verify_reset(fixture: Fixture, state_dir: Path, markers: Mapping[str, str] | None = None) -> ResetVerification:
     """reset, snapshot, reset, snapshot: the two must match after normalization.
 
     Also checks every mask rule against the seeded state, since a rule that
@@ -142,11 +155,11 @@ def verify_reset(fixture: Fixture, state_dir: Path) -> ResetVerification:
     """
     coverage = fixture.coverage(state_dir)
     try:
-        reset(fixture, state_dir)
+        reset(fixture, state_dir, markers)
         first = observe(fixture, state_dir)
         for surface, snap in first.items():
             fixture.adapter_spec(surface).normalizer.validate_against(snap)
-        reset(fixture, state_dir)
+        reset(fixture, state_dir, markers)
         second = observe(fixture, state_dir)
     except (SetupError, NormalizationError) as exc:
         return ResetVerification(ResetStatus.SETUP_FAILED, str(exc), (), coverage)
@@ -182,6 +195,7 @@ class Launch:
     netobs_dir: Path | None = None  # per-session observer logs go here; None: not observed
     canary: str | None = None
     observed_child: bool = False  # the server runs as the child of a relay (Linux capture)
+    markers: Mapping[str, str] | None = None  # lineage: marker name -> this run's token
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +208,7 @@ class NetworkSetup:
     canary: str | None
     capture: CaptureServer | None
     relay_socket: str | None = None  # Linux: the capture endpoint's Unix socket
+    markers: Mapping[str, str] | None = None  # lineage: marker name -> this run's token
 
 
 def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None = None) -> Launch:
@@ -251,6 +266,7 @@ def launch_for(fixture: Fixture, state_dir: Path, network: NetworkSetup | None =
         netobs_dir,
         canary,
         observed_child=relay,
+        markers=None if network is None else network.markers,
     )
 
 
@@ -287,6 +303,7 @@ class Session:
     window: tuple[int, int] | None = None  # wall clock (ns) from server start to exit
     call_spans: tuple[tuple[int, int], ...] = ()  # wall clock (ns) each call was in flight
     network: observers.ObserverLog | None = None  # observer log; None if not observed
+    marker_state: tuple[str, ...] = ()  # lineage: "location|name/variant" found in state after the session
 
     @property
     def transport_error(self) -> str | None:
@@ -323,8 +340,9 @@ async def run_session(
     launch: Launch | None = None,
 ) -> Session:
     names = tuple(c.name for c in calls)
+    markers = None if launch is None else launch.markers
     try:
-        reset(fixture, state_dir)
+        reset(fixture, state_dir, markers)
         before = observe(fixture, state_dir)
     except SetupError as exc:
         return Session(label, names, setup_error=str(exc))
@@ -352,7 +370,8 @@ async def run_session(
         else:
             for call in calls:
                 t0 = time.time_ns()
-                responses.append(await client.call_tool(call.name, expand_arguments(call.arguments, canary)))
+                arguments = expand_arguments(call.arguments, canary, markers)
+                responses.append(await client.call_tool(call.name, arguments))
                 spans.append((t0, time.time_ns()))
     except WireError as exc:
         if pages and not setup_error:
@@ -368,6 +387,7 @@ async def run_session(
     except SetupError as exc:
         setup_error = setup_error or str(exc)
         after = None
+    found = () if not markers or after is None else scan_state(fixture, state_dir, after, variants(markers))
     return Session(
         label=label,
         calls=names,
@@ -384,6 +404,7 @@ async def run_session(
         window=(started, ended),
         call_spans=tuple(spans),
         network=None if log is None else observers.read_log(log),
+        marker_state=found,
     )
 
 
@@ -444,6 +465,16 @@ class NetworkRun:
     canary: str | None
     capture_port: int | None
     captures: tuple[CaptureEvent, ...]
+    markers: tuple[tuple[str, str], ...] = ()  # lineage: (name, token)
+
+
+@dataclass(frozen=True, slots=True)
+class ChainRun:
+    """Sessions for one lineage chain."""
+
+    chain: ChainSpec
+    prefixes: tuple[tuple[Session, ...], ...]  # [j-1]: runs of the first j calls
+    without: tuple[tuple[Session, ...], ...]  # [i-1]: runs of the chain minus call i (i < last)
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +494,7 @@ class FixtureRun:
     launch: Launch | None = None
     network: NetworkRun | None = None
     probe_baselines: tuple[ProbeSessions, ...] = ()  # per probe: the probe alone
+    lineage: tuple[ChainRun, ...] = ()
 
     @property
     def control_stable(self) -> bool:
@@ -502,13 +534,17 @@ async def run_fixture(
     except observers.ObserverUnavailable as exc:
         observer, observer_error = None, str(exc)
     canary = f"mcpgt-canary-{secrets.token_hex(8)}" if spec.canary else None
+    markers = new_markers(fixture.lineage.markers) if fixture.lineage is not None else None
     async with contextlib.AsyncExitStack() as stack:
         relay_socket = None
         if spec.capture and sys.platform != "darwin":
             # A short path: Unix socket paths are limited to about 100 bytes.
             relay_socket = str(Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="mcpgt-"))) / "c.sock")
-        capture = await stack.enter_async_context(CaptureServer(canary, relay_socket)) if spec.capture else None
-        setup = NetworkSetup(observer, observer_error, work_dir / "netobs", canary, capture, relay_socket)
+        needles = variants(markers) if markers else None
+        capture = (
+            await stack.enter_async_context(CaptureServer(canary, relay_socket, needles)) if spec.capture else None
+        )
+        setup = NetworkSetup(observer, observer_error, work_dir / "netobs", canary, capture, relay_socket, markers)
         run = await _run_fixture(fixture, work_dir, runs, only_tools, concurrent_attempts, observe_concurrent, setup)
         captures = tuple(capture.events) if capture is not None else ()
     return dataclasses.replace(
@@ -519,6 +555,7 @@ async def run_fixture(
             canary=canary,
             capture_port=None if capture is None else capture.port,
             captures=captures,
+            markers=tuple(sorted((markers or {}).items())),
         ),
     )
 
@@ -547,7 +584,7 @@ async def _run_fixture(
         raise ValueError(f"{fixture.name} has no tool spec named {', '.join(sorted(unknown))}")
     state_dir = work_dir / "state"
     launch = launch_for(fixture, state_dir, network)  # targets: verify pinned source and sandbox first
-    reset_result = verify_reset(fixture, state_dir)
+    reset_result = verify_reset(fixture, state_dir, launch.markers)
     coverage = fixture.coverage(state_dir)
 
     controls: list[Session] = []
@@ -611,6 +648,10 @@ async def _run_fixture(
     if fixture.probes is not None and reset_result.status is not ResetStatus.SETUP_FAILED:
         probe_baselines, evidence = await _run_probes(fixture, state_dir, specs, evidence, runs, launch)
 
+    chains: list[ChainRun] = []
+    if fixture.lineage is not None and reset_result.status is not ResetStatus.SETUP_FAILED:
+        chains = await _run_lineage(fixture, state_dir, runs, launch)
+
     # Concurrent attempts, only where there is a falsifiable idempotence claim
     # to test, so the 2 x N extra sessions are spent where they can decide.
     lifecycle_inert = all(not any(o.changed(c) for c in StateCategory) for o in control_effect)
@@ -650,7 +691,28 @@ async def _run_fixture(
         untested_tools=tuple(sorted(listed - {s.name for s in fixture.tools})),
         launch=launch,
         probe_baselines=tuple(probe_baselines),
+        lineage=tuple(chains),
     )
+
+
+async def _run_lineage(fixture: Fixture, state_dir: Path, runs: int, launch: Launch) -> list[ChainRun]:
+    """For each chain: every prefix, then the chain without each call but the last."""
+    assert fixture.lineage is not None
+    by_key = {t.key: t for t in fixture.tools}
+    out = []
+    for chain in fixture.lineage.chains:
+        calls = [by_key[k] for k in chain.tools]
+
+        async def sessions(label: str, seq: list[ToolSpec]) -> tuple[Session, ...]:
+            return tuple(
+                [await run_session(fixture, state_dir, f"{label}-{n}", seq, launch) for n in range(1, runs + 1)]
+            )
+
+        name = "lineage:" + ">".join(chain.tools)
+        prefixes = [await sessions(f"{name}/first-{j}", calls[:j]) for j in range(1, len(calls) + 1)]
+        without = [await sessions(f"{name}/without-{i}", calls[: i - 1] + calls[i:]) for i in range(1, len(calls))]
+        out.append(ChainRun(chain, tuple(prefixes), tuple(without)))
+    return out
 
 
 async def _run_probes(
@@ -819,10 +881,11 @@ async def _ping_rtt(client: WireClient, pings: int = 3) -> float:
 
 
 async def _timed_call(
-    client: WireClient, spec: ToolSpec, canary: str | None = None
+    client: WireClient, spec: ToolSpec, launch: Launch | None = None
 ) -> tuple[RawResponse, tuple[float, float]]:
+    canary, markers = (None, None) if launch is None else (launch.canary, launch.markers)
     sent = time.monotonic()
-    response = await client.call_tool(spec.name, expand_arguments(spec.arguments, canary))
+    response = await client.call_tool(spec.name, expand_arguments(spec.arguments, canary, markers))
     return response, (sent, time.monotonic())
 
 
@@ -836,7 +899,7 @@ async def run_concurrent(
 ) -> ConcurrentRun:
     """reset -> start (one or two instances) -> list -> ping -> two calls at once -> stop -> observe."""
     try:
-        reset(fixture, state_dir)
+        reset(fixture, state_dir, None if launch is None else launch.markers)
         before = observe(fixture, state_dir)
     except SetupError as exc:
         return ConcurrentRun(label, mode, setup_error=str(exc))
@@ -861,9 +924,7 @@ async def run_concurrent(
                 rtts.append(await _ping_rtt(client))
             if setup_error is None:
                 pair = [clients[0], clients[0]] if instances == 1 else clients
-                for response, window in await asyncio.gather(
-                    *(_timed_call(c, spec, None if launch is None else launch.canary) for c in pair)
-                ):
+                for response, window in await asyncio.gather(*(_timed_call(c, spec, launch) for c in pair)):
                     responses.append(response)
                     windows.append(window)
     except WireError as exc:

@@ -37,6 +37,7 @@ def test_all_fixtures_present():
                 "startup-writer",
                 "network-side-effects",
                 "hidden-state",
+                "data-lineage",
             ]
         )
         == FIXTURES
@@ -77,6 +78,8 @@ def test_fixture_matches_ground_truth(name, tmp_path):
     report = reports.build(run, derive(run), f"test-{name}")
     exp = report["expectations"]
     assert exp["mismatches"] == [], reports.render_text(report)
-    assert exp["checked"] == len(fx.tools) * (len(IMPLEMENTED) + (fx.network is not None) + (fx.probes is not None))
+    assert exp["checked"] == len(fx.tools) * (len(IMPLEMENTED) + (fx.network is not None) + (fx.probes is not None)) + (
+        len(fx.lineage.chains) if fx.lineage else 0
+    )
     assert report["reset_verification"]["status"] == "verified"
     assert report["listing"]["stable"]

@@ -220,6 +220,11 @@ def _run(fx: fixtures.Fixture, args: argparse.Namespace) -> int:
         for verdict in [*tool["verdicts"], *(tool[k] for k in ("network", "probe") if k in tool)]
         if verdict["outcome"] == Outcome.VIOLATION.value
     ]
+    violations += [
+        f"lineage {' > '.join(c['chain'])}"
+        for c in (report.get("lineage") or {}).get("chains", [])
+        if c["outcome"] == Outcome.VIOLATION.value
+    ]
     lifecycle = (report.get("network") or {}).get("lifecycle")
     if lifecycle and lifecycle["outcome"] == Outcome.VIOLATION.value:
         violations.append("server lifecycle network")

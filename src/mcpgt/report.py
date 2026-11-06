@@ -17,6 +17,7 @@ from typing import Any
 
 import mcpgt
 from mcpgt.fixture import Expectation, Fixture
+from mcpgt.lineage import LineageVerdict, derive_lineage
 from mcpgt.network import NetworkVerdict, derive_network
 from mcpgt.probes import ProbeVerdict, derive_probes
 from mcpgt.provenance import (
@@ -192,6 +193,10 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
                 **({"probe": probe_entry} if probe_entry is not None else {}),
             }
         )
+    lineage, (lin_checked, lin_matched, lin_mismatches) = _lineage_block(run, audit)
+    checked += lin_checked
+    matched += lin_matched
+    mismatches += lin_mismatches
     return {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -221,6 +226,7 @@ def build(run: FixtureRun, verdicts: list[Verdict], run_id: str, audit: bool = F
         },
         "network": _network_block(run, network),
         "probes": _probes_block(run),
+        "lineage": lineage,
         "tools": tools,
         "untested_tools": list(run.untested_tools),
         "expectations": {
@@ -240,6 +246,42 @@ def network_check(verdict: NetworkVerdict, want: tuple[Outcome, Any]) -> list[st
     got = verdict.outcome.value + (f":{verdict.reason.value}" if verdict.reason else "")
     exp = outcome.value + (f":{reason.value}" if reason else "")
     return [f"network verdict {got}, expected {exp}"]
+
+
+def lineage_check(verdict: LineageVerdict) -> list[str]:
+    problems = []
+    if verdict.chain.expected is not None:
+        outcome, reason = verdict.chain.expected
+        if verdict.outcome is not outcome or verdict.reason is not reason:
+            got = verdict.outcome.value + (f":{verdict.reason.value}" if verdict.reason else "")
+            exp = outcome.value + (f":{reason.value}" if reason else "")
+            problems.append(f"lineage verdict {got}, expected {exp}")
+    want = verdict.chain.expected_completeness
+    if want is not None and verdict.completeness != want:
+        problems.append(f"completeness {verdict.completeness}, expected {want}")
+    return problems
+
+
+def _lineage_block(run: FixtureRun, audit: bool) -> tuple[dict[str, Any] | None, tuple[int, int, list[dict[str, Any]]]]:
+    """The markers planted, and one verdict per chain with its sessions."""
+    if run.fixture.lineage is None:
+        return None, (0, 0, [])
+    checked = matched = 0
+    mismatches: list[dict[str, Any]] = []
+    chains = []
+    for verdict, chain_run in zip(derive_lineage(run), run.lineage, strict=True):
+        entry = verdict.to_json()
+        entry["sessions"] = [s.to_json() for g in chain_run.prefixes + chain_run.without for s in g]
+        if not audit and (verdict.chain.expected is not None or verdict.chain.expected_completeness is not None):
+            problems = lineage_check(verdict)
+            checked += 1
+            matched += not problems
+            entry["expected"] = {"problems": problems, "matched": not problems}
+            if problems:
+                mismatches.append({"tool": verdict.chain.key, "test": "lineage", "problems": problems})
+        chains.append(entry)
+    markers = {} if run.network is None else dict(run.network.markers)
+    return {"markers": markers, "chains": chains}, (checked, matched, mismatches)
 
 
 def probe_check(verdict: ProbeVerdict, want: tuple[Outcome, Reason | None]) -> list[str]:
@@ -355,6 +397,8 @@ def render_text(report: dict[str, Any]) -> str:
         lines += _render_network(report, net)
     if report.get("probes"):
         lines += _render_probes(report)
+    if report.get("lineage"):
+        lines += _render_lineage(report["lineage"])
     exp = report["expectations"]
     lines.append("")
     if audit:
@@ -412,4 +456,26 @@ def _render_probes(report: dict[str, Any]) -> list[str]:
         exp = v.get("expected")
         mark = "" if exp is None else ("  ok" if exp["matched"] else "  MISMATCH")
         lines.append(f"  {v['tool']:<26} {v['test'] or '-':<18} {v['declared']:<10} {verdict:<38} {v['detail']}{mark}")
+    return lines
+
+
+def _render_lineage(lineage: dict[str, Any]) -> list[str]:
+    lines = ["", f"  lineage: markers {', '.join(lineage['markers']) or '-'}"]
+    for chain in lineage["chains"]:
+        verdict = chain["outcome"] + (f":{chain['reason']}" if chain["reason"] else "")
+        exp = chain.get("expected")
+        mark = "" if exp is None else ("  ok" if exp["matched"] else "  MISMATCH")
+        completeness = f" ({chain['completeness']})" if chain["completeness"] else ""
+        lines.append(f"  {' > '.join(chain['chain'])}: {verdict}{completeness}{mark}")
+        lines.append(f"      {chain['detail']}")
+        for m in chain["markers"]:
+            if not m["transmitted"]:
+                continue
+            steps = []
+            for hop in m["path"]:
+                who = "source" if hop["call"] is None else f"call {hop['call']} {hop['tool']}"
+                steps.append(f"{who}: {hop['what']} [{hop['grade']}]")
+            lines.append(f"      {m['marker']}: " + "  ->  ".join(steps))
+            if m["not_needed_calls"]:
+                lines.append(f"      {m['marker']}: leaks without call(s) {', '.join(map(str, m['not_needed_calls']))}")
     return lines

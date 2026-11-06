@@ -13,6 +13,7 @@ is how false accusations get made.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tomllib
@@ -154,6 +155,32 @@ class ProbeSpec:
         return {"tools": list(self.tools), "ignore": list(self.ignore)}
 
 
+MARKER = re.compile(r"\{marker:([a-z0-9_]+)\}")
+MAX_CHAIN = 6  # calls per lineage chain; each adds sessions
+
+
+@dataclass(frozen=True, slots=True)
+class ChainSpec:
+    """Tools called in this order, to trace where planted markers travel."""
+
+    tools: tuple[str, ...]  # tool spec keys
+    expected: tuple[Outcome, NetworkReason | None] | None = None  # fixtures only
+    expected_completeness: str | None = None  # fixtures only: "complete" or "partial"
+
+    @property
+    def key(self) -> str:
+        return " > ".join(self.tools)
+
+
+@dataclass(frozen=True, slots=True)
+class LineageSpec:
+    markers: tuple[str, ...]  # names planted as {marker:NAME} in seeds or tool arguments
+    chains: tuple[ChainSpec, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {"markers": list(self.markers), "chains": [list(c.tools) for c in self.chains]}
+
+
 @dataclass(frozen=True, slots=True)
 class FixtureCoverage:
     adapters: tuple[Coverage, ...]
@@ -188,6 +215,7 @@ class Fixture:
     node: str | None = None  # required Node major version, for build and run
     network: NetworkSpec | None = None  # observe network interactions against this policy
     probes: ProbeSpec | None = None  # compare other tools' outputs after each tool
+    lineage: LineageSpec | None = None  # trace planted markers along chains of calls
 
     @property
     def kind(self) -> str:
@@ -298,7 +326,7 @@ def load(name_or_path: str | Path) -> Fixture:
         data,
         file.name,
         required={section, "state", "adapters"},
-        optional={"tools", "network", "probes"} | ({"source"} if is_target else set()),
+        optional={"tools", "network", "probes", "lineage"} | ({"source"} if is_target else set()),
     )
 
     meta = data[section]
@@ -334,6 +362,9 @@ def load(name_or_path: str | Path) -> Fixture:
     )
     if len({t.key for t in tools}) != len(tools):
         raise FixtureError("duplicate tool entries: give each argument set of one tool a distinct variant")
+    lineage = _lineage(data["lineage"], root, adapters, tools, network, is_target) if "lineage" in data else None
+    if lineage is None and MARKER.search(json.dumps([t.arguments for t in tools])):
+        raise FixtureError("{marker:NAME} in tool arguments needs a [lineage] section")
     if probes is not None:
         missing = set(probes.tools) - {t.key for t in tools}
         if missing:
@@ -361,6 +392,7 @@ def load(name_or_path: str | Path) -> Fixture:
         node=node,
         network=network,
         probes=probes,
+        lineage=lineage,
     )
 
 
@@ -531,16 +563,74 @@ def _probes(data: Any) -> ProbeSpec:
     return ProbeSpec(tools, ignore)
 
 
-def expand_arguments(value: Any, canary: str | None) -> Any:
+def _lineage(
+    data: Any,
+    root: Path,
+    adapters: tuple[AdapterSpec, ...],
+    tools: tuple[ToolSpec, ...],
+    network: NetworkSpec | None,
+    is_target: bool,
+) -> LineageSpec:
+    where = "[lineage]"
+    _keys(data, where, required={"chains"})
+    if network is None or network.policy != "deny" or not network.capture:
+        raise FixtureError(f'{where} needs [network] with policy = "deny" and capture = true')
+    keys = {t.key for t in tools}
+    chains = []
+    for i, chain in enumerate(_list(data["chains"], f"{where}.chains")):
+        at = f"{where}.chains[{i}]"
+        _keys(chain, at, required={"tools"}, optional=set() if is_target else {"expected", "completeness"})
+        names = tuple(_strs(chain["tools"], f"{at}.tools"))
+        if not 1 <= len(names) <= MAX_CHAIN:
+            raise FixtureError(f"{at}.tools needs 1 to {MAX_CHAIN} tools")
+        missing = set(names) - keys
+        if missing:
+            raise FixtureError(f"{at}.tools: no [[tools]] entry for {', '.join(sorted(missing))}")
+        expected = None
+        if "expected" in chain:
+            expected = _network_expectation({"verdict": chain["expected"]}, f"{at}.expected")
+        completeness = chain.get("completeness")
+        if completeness not in (None, "complete", "partial"):
+            raise FixtureError(f'{at}.completeness must be "complete" or "partial"')
+        chains.append(ChainSpec(names, expected, completeness))
+    if not chains:
+        raise FixtureError(f"{where}.chains needs at least one chain")
+    text = _seed_text(root, adapters) + json.dumps([t.arguments for t in tools])
+    markers = tuple(sorted(set(MARKER.findall(text))))
+    if not markers:
+        raise FixtureError(f"{where}: no {{marker:NAME}} placeholder in any seed or tool argument")
+    return LineageSpec(markers, tuple(chains))
+
+
+def _seed_text(root: Path, adapters: tuple[AdapterSpec, ...]) -> str:
+    """Every seed file's text, for finding marker placeholders."""
+    parts = []
+    for adapter in adapters:
+        seed = None if adapter.seed is None else root / adapter.seed
+        if seed is None:
+            continue
+        files = [seed] if seed.is_file() else sorted(p for p in seed.rglob("*") if p.is_file())
+        parts += [f.read_text(errors="replace") for f in files]
+    return "\n".join(parts)
+
+
+def expand_markers(text: str, markers: Mapping[str, str] | None) -> str:
+    """Replace every {marker:NAME} with its token for this run."""
+    if not markers:
+        return text
+    return MARKER.sub(lambda m: markers.get(m.group(1), m.group(0)), text)
+
+
+def expand_arguments(value: Any, canary: str | None, markers: Mapping[str, str] | None = None) -> Any:
     """Tool arguments with every "{canary}" in their strings replaced."""
     if isinstance(value, str):
         if "{canary}" in value and canary is None:
             raise FixtureError("{canary} in tool arguments needs [network] with canary = true")
-        return value.replace("{canary}", canary) if canary else value
+        return expand_markers(value.replace("{canary}", canary) if canary else value, markers)
     if isinstance(value, Mapping):
-        return {k: expand_arguments(v, canary) for k, v in value.items()}
+        return {k: expand_arguments(v, canary, markers) for k, v in value.items()}
     if isinstance(value, list):
-        return [expand_arguments(v, canary) for v in value]
+        return [expand_arguments(v, canary, markers) for v in value]
     return value
 
 

@@ -1,0 +1,174 @@
+[fixture]
+name = "data-lineage"
+description = "No tool leaks on its own; some sequences of tools leak a synthetic SSN, one of them through server memory."
+command = ["{python}", "{target}/server.py"]
+
+[state]
+locations = ["sqlite:state.db"]
+
+[[adapters]]
+kind = "sqlite"
+label = "state.db"
+seed = "seed.sql"
+business = ["customers", "drafts", "reports"]
+
+[network]
+policy = "deny"
+capture = true
+canary = false
+
+# Every tool's own network verdict is PASS: called alone from the seed, none
+# of them sends anything. These chains are what leak.
+
+[[lineage.chains]]
+# The SSN is copied into drafts, then synced (base64): every hop observed.
+# read_customer returns it too, but the leak happens without it.
+tools = ["read_customer", "save_draft", "sync_drafts"]
+expected = "VIOLATION"
+completeness = "complete"
+
+[[lineage.chains]]
+# The SSN goes through server memory: remember is needed, but leaves no trace.
+tools = ["remember", "beacon"]
+expected = "VIOLATION"
+completeness = "partial"
+
+[[lineage.chains]]
+# The SSN moves between tables and stays local.
+tools = ["save_draft", "export_report"]
+expected = "PASS"
+
+[[lineage.chains]]
+# Sent over HTTPS: the payload cannot be read, so no verdict either way.
+tools = ["save_draft", "sync_drafts_tls"]
+expected = "INCONCLUSIVE:PARTIAL_OBSERVATION"
+
+[[tools]]
+name = "read_customer"
+arguments = { id = 1 }
+
+[tools.expected.read_only]
+verdict = "PASS"
+business_changed = false
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.destructive]
+verdict = "NOT_APPLICABLE:SUPERSEDED_BY_READ_ONLY"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "save_draft"
+arguments = { id = 1 }
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "sync_drafts"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "sync_drafts_tls"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "export_report"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "remember"
+arguments = { id = 1 }
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
+
+[[tools]]
+name = "beacon"
+
+[tools.expected.read_only]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.sequential_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.concurrent_idempotence]
+verdict = "NOT_APPLICABLE:PERMISSIVE_DECLARATION"
+
+[tools.expected.destructive]
+verdict = "PASS"
+
+[tools.expected.network]
+verdict = "PASS"
